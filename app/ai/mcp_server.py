@@ -7,7 +7,7 @@ import json
 
 from mcp.server.fastmcp import FastMCP
 
-from app.config import get_settings
+from app.core.config import get_settings
 from app.pg_tools import PostgresRepository
 
 mcp = FastMCP("VOLTA Corporate Tools")

@@ -5,7 +5,7 @@ import anyio
 from fastapi import APIRouter, Depends, HTTPException, status
 
 # Nossos modelos Pydantic (movidos para models.py)
-from app.models import (
+from app.db.models import (
     ChatRequest,
     ChatResponse,
     CorporateAnswer,
@@ -16,12 +16,12 @@ from app.models import (
 )
 
 # Nossas lógicas isoladas
-from app.guardrails import guardrail_entrada, guardrail_saida
-from app.storage import SessionRepository
-from app.observability import Observability
+from app.core.guardrails import guardrail_entrada, guardrail_saida
+from app.db.storage import SessionRepository
+from app.core.observability import Observability
 
 # Função fictícia para ilustrar a injeção do Grafo (você pode colocar isso no storage.py ou num dependencies.py)
-from app.dependencies import get_sessions, get_telemetry, get_graph
+from app.core.dependencies import get_sessions, get_telemetry, get_graph
 
 router = APIRouter()
 

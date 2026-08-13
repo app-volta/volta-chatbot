@@ -2,7 +2,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 
 # Nossos modelos Pydantic centralizados
-from app.models import (
+from app.db.models import (
     OccurrenceDraftCreate,
     OccurrenceDraftResponse,
     ApprovalRequest,
@@ -10,8 +10,8 @@ from app.models import (
 )
 
 # Repositório e Injeção de Dependência
-from app.storage import PostgresRepository
-from app.dependencies import get_postgres  # Puxando do nosso injetor central
+from app.db.storage import PostgresRepository
+from app.core.dependencies import get_postgres  # Puxando do nosso injetor central
 
 router = APIRouter()
 

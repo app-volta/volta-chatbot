@@ -1,11 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
 # Modelos do Pydantic
-from app.models import SessionCreateRequest, SessionResponse
+from app.db.models import SessionCreateRequest, SessionResponse
 
 # Injeção de Dependência
-from app.storage import SessionRepository
-from app.dependencies import get_sessions
+from app.db.storage import SessionRepository
+from app.core.dependencies import get_sessions
 
 router = APIRouter()
 

@@ -9,7 +9,7 @@ from time import perf_counter
 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
-from app.config import Settings
+from app.core.config import Settings
 
 REQUESTS = Counter("volta_requests_total", "Requisições do VOLTA", ["route", "status"])
 ERRORS = Counter("volta_errors_total", "Erros do VOLTA", ["component"])

@@ -9,8 +9,8 @@ from datetime import UTC, datetime
 
 import httpx
 
-from app.config import Settings
-from app.models import CollectionRequest
+from app.core.config import Settings
+from app.db.models import CollectionRequest
 
 
 class CooperativeA2AClient:

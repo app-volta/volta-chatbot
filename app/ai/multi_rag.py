@@ -16,8 +16,8 @@ from langchain_core.documents import Document
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from app.config import Settings
-from app.models import SourceCitation
+from app.core.config import Settings
+from app.db.models import SourceCitation
 
 Corpus = Literal["operational", "regulatory", "cooperatives", "history"]
 CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history")

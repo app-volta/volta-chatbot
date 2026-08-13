@@ -122,3 +122,7 @@ class CollectionRequest(BaseModel):
     volume_kg: float
     material_type: str
     urgency: Literal["low", "medium", "high"]
+    
+class GuardrailResult(BaseModel):
+    allowed: bool
+    reason: str | None = None
