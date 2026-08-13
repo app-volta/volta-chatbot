@@ -15,7 +15,7 @@ from app.config import Settings
 from app.multi_rag import FederatedRag, serialize_citations
 from app.observability import Observability
 from app.storage import PostgresRepository
-from app.prompts import (
+from prompts import (
     DATA_PROMPT,
     JUDGE_PROMPT,
     ORCHESTRATOR_PROMPT,
@@ -158,6 +158,10 @@ class AgentTeam:
             self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
             return parsed
         except Exception as exc:
+            print(f"\n❌❌❌ ERRO FATAL NO AGENTE {name} ❌❌❌")
+            print(exc) 
+            print("❌" * 30 + "\n")
+
             self.telemetry.record_agent(name, model, started, payload, str(exc), failed=True)
             raise RuntimeError(f"Falha controlada no especialista {name}.") from exc
 

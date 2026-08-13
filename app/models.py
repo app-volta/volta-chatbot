@@ -5,11 +5,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-class GuardrailResult(BaseModel):
-    blocked: bool
-    sanitized_text: str
-    reason: str | None = None
-
 # ==============================================================================
 # ENUMS
 # ==============================================================================
@@ -44,9 +39,20 @@ class ProposedOccurrence(BaseModel):
     category: str = Field(min_length=2, max_length=80)
     requires_sanitization: bool = False
 
+# 👇 NOVO MODELO: Estrutura para preencher a Tela 3 (Análise da IA)
+class TriageAnalysis(BaseModel):
+    tipo_material: str = Field(description="Ex: Papelão Classe A, Sucata metálica, Plástico Multicamada")
+    contaminacao: str = Field(description="Ex: Baixa, Média, Alta")
+    quantidade_estimada: str = Field(description="Estimativa de peso. Ex: ≈ 38 kg")
+    unidades: str | None = Field(default=None, description="Ex: 11 un. (caixas/fardos)")
+    confianca_ia: int = Field(description="Porcentagem de certeza da IA (0 a 100)")
+    recomendacao_automatica: str = Field(description="Dica curta de armazenamento. Ex: Guarde num lugar seco.")
+
 class SpecialistResult(BaseModel):
     proposed_occurrence: ProposedOccurrence | None = None
     metrics_summary: dict | None = None
+    # 👇 Adicionamos a análise da triagem no resultado do especialista
+    triage_analysis: TriageAnalysis | None = None
 
 class JudgeVerdict(BaseModel):
     approved: bool
@@ -65,6 +71,8 @@ class ChatRequest(BaseModel):
     tenant_id: str
     user_id: str
     message: str
+    # 👇 Novo campo opcional pra receber a foto da câmera convertida em texto!
+    image_base64: str | None = None
 
 class ChatResponse(BaseModel):
     request_id: UUID
@@ -73,6 +81,8 @@ class ChatResponse(BaseModel):
     response: CorporateAnswer
     citations: list[SourceCitation] = Field(default_factory=list)
     proposed_occurrence: ProposedOccurrence | None = None
+    # 👇 O Front-end vai puxar os dados visuais daqui para montar a tela!
+    triage_analysis: TriageAnalysis | None = None
     judge: JudgeVerdict | None = None
 
 class OccurrenceDraftCreate(BaseModel):
