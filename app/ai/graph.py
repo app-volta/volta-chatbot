@@ -11,10 +11,10 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-from app.agents import AgentTeam
-from app.guardrails import guardrail_entrada, guardrail_saida
-from app.multi_rag import FederatedRag
-from app.models import CorporateAnswer, JudgeVerdict, RouteName, SourceCitation, SpecialistResult
+from app.ai.agents import AgentTeam
+from app.core.guardrails import guardrail_entrada, guardrail_saida
+from app.ai.multi_rag import FederatedRag
+from app.db.models import CorporateAnswer, JudgeVerdict, RouteName, SourceCitation, SpecialistResult
 
 
 class VoltaState(TypedDict, total=False):

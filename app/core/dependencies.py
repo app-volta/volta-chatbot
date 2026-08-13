@@ -1,10 +1,10 @@
 from fastapi import Request
-from app.config import get_settings
-from app.observability import Observability
-from app.graph import build_volta_graph
+from app.core.config import get_settings
+from app.core.observability import Observability
+from app.ai.graph import build_volta_graph
 
 # Importando as instâncias e tipagens do nosso novo repositório centralizado
-from app.storage import db_postgres, db_mongo, PostgresRepository, SessionRepository
+from app.db.storage import db_postgres, db_mongo, PostgresRepository, SessionRepository
 
 def get_postgres() -> PostgresRepository:
     """Injeta a conexão transacional do banco de dados (Ocorrências/Métricas)."""

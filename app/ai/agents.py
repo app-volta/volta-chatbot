@@ -11,10 +11,10 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
 
-from app.config import Settings
-from app.multi_rag import FederatedRag, serialize_citations
-from app.observability import Observability
-from app.storage import PostgresRepository
+from app.core.config import Settings
+from app.ai.multi_rag import FederatedRag, serialize_citations
+from app.core.observability import Observability
+from app.db.storage import PostgresRepository
 from prompts import (
     DATA_PROMPT,
     JUDGE_PROMPT,
@@ -25,7 +25,7 @@ from prompts import (
     TRIAGE_PROMPT,
     temporal_context,
 )
-from app.models import CorporateAnswer, JudgeVerdict, RouteDecision, SpecialistResult
+from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SpecialistResult
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 

@@ -7,7 +7,7 @@ autorizada deve reconciliar identificadores somente fora do fluxo de IA.
 import re
 import unicodedata
 
-from app.models import GuardrailResult
+from app.db.models import GuardrailResult
 
 CPF_RE = re.compile(r"\b\d{3}[.\s-]?\d{3}[.\s-]?\d{3}[\s-]?\d{2}\b")
 CNPJ_RE = re.compile(r"\b\d{2}[.\s-]?\d{3}[.\s-]?\d{3}[/\s-]?\d{4}[\s-]?\d{2}\b")

@@ -15,7 +15,7 @@ from psycopg_pool import ConnectionPool
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 
-from app.models import ProposedOccurrence
+from app.db.models import ProposedOccurrence
 
 
 # ==============================================================================

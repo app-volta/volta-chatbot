@@ -1,4 +1,4 @@
-from app.guardrails import guardrail_entrada, guardrail_saida
+from app.core.guardrails import guardrail_entrada, guardrail_saida
 
 
 def test_masks_cpf_before_any_llm_or_database_operation() -> None:

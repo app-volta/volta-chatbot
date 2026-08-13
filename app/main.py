@@ -3,13 +3,14 @@ from fastapi import FastAPI, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.mongodb import MongoDBSaver
 
-from app.config import get_settings
-from app.observability import Observability
-from app.multi_rag import FederatedRag
-from app.agents import AgentTeam
-from app.graph import build_volta_graph
-from app.storage import db_postgres, db_mongo
-from app.routes import chat, occurrences, sessions
+from app.api import chat, occurrences
+from app.core.config import get_settings
+from app.core.observability import Observability
+from app.ai.multi_rag import FederatedRag
+from app.ai.agents import AgentTeam
+from app.ai.graph import build_volta_graph
+from app.db.storage import db_postgres, db_mongo
+from app.api import sessions
 
 
 @asynccontextmanager
