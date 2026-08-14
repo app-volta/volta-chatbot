@@ -51,67 +51,79 @@ class PostgresRepository:
             return False
 
     def create_occurrence_draft(
-        self, tenant_id: str, plant_id: str, created_by: str, proposal: ProposedOccurrence
-    ) -> UUID:
-        draft_id = uuid4()
+        self, company_id: int, area_id: int, user_id: int, ai_data: dict
+    ) -> int:
+        """Salva o rascunho do incidente e atrela o laudo da IA a ele."""
+        with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
+            # 1. Cria o incidente com status pendente (Aguardando validação humana)
+            cursor.execute(
+                """
+                INSERT INTO incident (
+                    company_id, area_id, user_id, 
+                    contamination_level, estimated_quantity, status, registered_at
+                ) VALUES (
+                    %(company_id)s, %(area_id)s, %(user_id)s, 
+                    %(contamination)s, %(volume)s, 'AGUARDANDO_VALIDACAO', CURRENT_TIMESTAMP
+                ) RETURNING id;
+                """,
+                {
+                    "company_id": company_id,
+                    "area_id": area_id,
+                    "user_id": user_id,
+                    "contamination": ai_data.get("ai_contamination_level", "N/A"),
+                    "volume": ai_data.get("estimated_quantity_kg", 0.0),
+                }
+            )
+            incident_id = cursor.fetchone()["id"]
+
+            # 2. Salva o laudo gerado pelo Gemini na tabela ai_report
+            cursor.execute(
+                """
+                INSERT INTO ai_report (
+                    incident_id, detected_waste_type, ai_contamination_level, 
+                    recommendations, report_text, generated_at
+                ) VALUES (
+                    %(incident_id)s, %(detected)s, %(contamination)s, 
+                    %(recs)s, %(report)s, CURRENT_TIMESTAMP
+                );
+                """,
+                {
+                    "incident_id": incident_id,
+                    "detected": ai_data.get("detected_waste_type", ""),
+                    "contamination": ai_data.get("ai_contamination_level", ""),
+                    "recs": ai_data.get("recommendations", ""),
+                    "report": ai_data.get("report_text", ""),
+                }
+            )
+            return incident_id
+
+    def approve_occurrence_draft(self, draft_id: int) -> int:
+        """Oficializa o registro mudando o status para REGISTRADA."""
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s RETURNING id",
+                (draft_id,)
+            )
+            updated = cursor.fetchone()
+            if not updated:
+                raise LookupError("Rascunho não encontrado.")
+            return updated["id"]
+        
+    def get_all_drafts(self) -> list[dict]:
+        """Busca os incidentes pendentes junto com o laudo da IA."""
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                INSERT INTO occurrence_drafts (
-                    id, tenant_id, plant_id, description, category, volume_kg,
-                    contamination_risk, sanitation_level, technical_rationale,
-                    missing_information, status, created_by, created_at
-                ) VALUES (%(id)s, %(tenant_id)s, %(plant_id)s, %(description)s, %(category)s,
-                    %(volume_kg)s, %(contamination_risk)s, %(sanitation_level)s,
-                    %(technical_rationale)s, %(missing_information)s,
-                    'AGUARDANDO_VALIDACAO', %(created_by)s, %(created_at)s)
-                """,
-                {
-                    "id": draft_id,
-                    "tenant_id": tenant_id,
-                    "plant_id": plant_id,
-                    "description": proposal.description,
-                    "category": proposal.category,
-                    "volume_kg": getattr(proposal, "estimated_volume_kg", 0.0),
-                    "contamination_risk": getattr(proposal, "contamination_risk", False),
-                    "sanitation_level": getattr(proposal, "sanitation_level", "N/A"),
-                    "technical_rationale": getattr(proposal, "technical_rationale", ""),
-                    "missing_information": getattr(proposal, "missing_information", ""),
-                    "created_by": created_by,
-                    "created_at": datetime.now(UTC),
-                },
-            )
-        return draft_id
-
-    def approve_occurrence_draft(self, draft_id: UUID, approved_by: str) -> UUID:
-        occurrence_id = uuid4()
-        now = datetime.now(UTC)
-        with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM occurrence_drafts WHERE id = %s FOR UPDATE", (draft_id,))
-            draft = cursor.fetchone()
-            if not draft:
-                raise LookupError("Rascunho de ocorrência não encontrado.")
-            if draft["status"] != "AGUARDANDO_VALIDACAO":
-                raise ValueError("Este rascunho já foi processado.")
-
-            cursor.execute(
+                SELECT i.id, i.status, i.estimated_quantity, 
+                       a.detected_waste_type, a.report_text
+                FROM incident i
+                JOIN ai_report a ON i.id = a.incident_id
+                WHERE i.status = 'AGUARDANDO_VALIDACAO'
+                ORDER BY i.registered_at DESC
                 """
-                INSERT INTO occurrences (
-                    id, tenant_id, plant_id, description, category, volume_kg,
-                    contamination_risk, sanitation_level, status, created_by,
-                    approved_by, created_at, approved_at
-                ) VALUES (%(id)s, %(tenant_id)s, %(plant_id)s, %(description)s, %(category)s,
-                    %(volume_kg)s, %(contamination_risk)s, %(sanitation_level)s,
-                    'REGISTRADA', %(created_by)s, %(approved_by)s, %(created_at)s, %(approved_at)s)
-                """,
-                {**draft, "id": occurrence_id, "approved_by": approved_by, "approved_at": now},
             )
-            cursor.execute(
-                "UPDATE occurrence_drafts SET status = 'APROVADA', approved_by = %s, approved_at = %s WHERE id = %s",
-                (approved_by, now, draft_id),
-            )
-        return occurrence_id
-
+            return cursor.fetchall()    
+        
     def consultar_metricas_esg(self, month: int, year: int, tenant_id: str | None = None) -> list[dict]:
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
