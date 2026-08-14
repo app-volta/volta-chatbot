@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-
+from typing import Optional
 from pydantic import BaseModel, Field
 
 # ==============================================================================
@@ -39,7 +39,6 @@ class ProposedOccurrence(BaseModel):
     category: str = Field(min_length=2, max_length=80)
     requires_sanitization: bool = False
 
-# 👇 NOVO MODELO: Estrutura para preencher a Tela 3 (Análise da IA)
 class TriageAnalysis(BaseModel):
     tipo_material: str = Field(description="Ex: Papelão Classe A, Sucata metálica, Plástico Multicamada")
     contaminacao: str = Field(description="Ex: Baixa, Média, Alta")
@@ -51,7 +50,6 @@ class TriageAnalysis(BaseModel):
 class SpecialistResult(BaseModel):
     proposed_occurrence: ProposedOccurrence | None = None
     metrics_summary: dict | None = None
-    # 👇 Adicionamos a análise da triagem no resultado do especialista
     triage_analysis: TriageAnalysis | None = None
 
 class JudgeVerdict(BaseModel):
@@ -64,6 +62,27 @@ class CorporateAnswer(BaseModel):
     recommended_actions: list[str] = Field(default_factory=list)
 
 # ==============================================================================
+# O CONTRATO DA IA PREDITIVA (Visão Computacional)
+# ==============================================================================
+class AnaliseResiduoIA(BaseModel):
+    detected_waste_type: str = Field(
+        description="O tipo de resíduo identificado na imagem (ex: Papelão contaminado, Óleo lubrificante, Plástico reciclável)."
+    )
+    ai_contamination_level: str = Field(
+        description="Nível de contaminação estimado: 'BAIXO', 'MEDIO' ou 'ALTO'."
+    )
+    estimated_quantity_kg: Optional[float] = Field(
+        None, 
+        description="Estimativa visual de peso em kg. Se não for possível deduzir pela imagem, retorne null."
+    )
+    recommendations: str = Field(
+        description="Passo a passo de segurança para manuseio, EPIs necessários e qual o descarte correto."
+    )
+    report_text: str = Field(
+        description="Um laudo descritivo resumindo o que foi detectado na imagem."
+    )    
+
+# ==============================================================================
 # REQUESTS & RESPONSES (ENDPOINTS)
 # ==============================================================================
 class ChatRequest(BaseModel):
@@ -71,7 +90,6 @@ class ChatRequest(BaseModel):
     tenant_id: str
     user_id: str
     message: str
-    # 👇 Novo campo opcional pra receber a foto da câmera convertida em texto!
     image_base64: str | None = None
 
 class ChatResponse(BaseModel):
@@ -81,25 +99,24 @@ class ChatResponse(BaseModel):
     response: CorporateAnswer
     citations: list[SourceCitation] = Field(default_factory=list)
     proposed_occurrence: ProposedOccurrence | None = None
-    # 👇 O Front-end vai puxar os dados visuais daqui para montar a tela!
     triage_analysis: TriageAnalysis | None = None
     judge: JudgeVerdict | None = None
 
 class OccurrenceDraftCreate(BaseModel):
-    tenant_id: str
-    plant_id: str
-    created_by: str
-    proposal: ProposedOccurrence
+    company_id: int
+    area_id: int
+    user_id: int
+    ai_data: AnaliseResiduoIA 
 
 class OccurrenceDraftResponse(BaseModel):
-    draft_id: UUID
+    draft_id: int
     status: str
 
 class ApprovalRequest(BaseModel):
     approved_by: str
 
 class ApprovalResponse(BaseModel):
-    occurrence_id: UUID
+    occurrence_id: int
     status: str
 
 class SessionCreateRequest(BaseModel):
