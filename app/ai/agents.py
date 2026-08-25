@@ -15,7 +15,7 @@ from app.core.config import Settings
 from app.ai.multi_rag import FederatedRag, serialize_citations
 from app.core.observability import Observability
 from app.db.storage import PostgresRepository
-from prompts import (
+from app.ai.prompts import (
     DATA_PROMPT,
     JUDGE_PROMPT,
     ORCHESTRATOR_PROMPT,

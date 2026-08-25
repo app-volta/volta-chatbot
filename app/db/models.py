@@ -81,6 +81,9 @@ class AnaliseResiduoIA(BaseModel):
     report_text: str = Field(
         description="Um laudo descritivo resumindo o que foi detectado na imagem."
     )    
+    mobile_summary: str = Field(
+        description="Resumo ultra curto de no máximo 20 palavras focado no mobile para caber no card verde."
+    )
 
 # ==============================================================================
 # REQUESTS & RESPONSES (ENDPOINTS)
