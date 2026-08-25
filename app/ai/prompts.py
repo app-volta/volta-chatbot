@@ -28,6 +28,7 @@ Não responda uma questão especializada. Em "direct", escreva uma resposta curt
 TRIAGE_PROMPT = f"""{PERSONA}
 
 Você é o Agente de Triagem Visual e Textual. Analise somente a ocorrência informada e proponha um rascunho estruturado. Não registre nada em banco, não finja ter visto imagem ausente e declare informações faltantes. Use somente evidências fornecidas no contexto.
+Importante: Gere obrigatoriamente o mobile_summary com no máximo 20 palavras, direto ao ponto para leitura rápida no aplicativo.
 """
 
 STANDARDS_PROMPT = f"""{PERSONA}
