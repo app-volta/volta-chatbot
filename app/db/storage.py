@@ -34,6 +34,24 @@ class PostgresRepository:
             kwargs={"row_factory": dict_row, "prepare_threshold": None},
             open=True,
         )
+        
+    def get_incident_history_by_area(self, area_id: int) -> list[dict]:
+        """Busca o historico de peso de lixo de uma cacamba especifica para treinar a IA."""
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    DATE(registered_at) AS data_registro,
+                    SUM(estimated_quantity) AS peso_total_dia
+                FROM incident
+                WHERE area_id = %s AND estimated_quantity IS NOT NULL
+                GROUP BY DATE(registered_at)
+                ORDER BY data_registro ASC;
+                """,
+                (area_id,)
+            )
+            # Formata a data para string e o peso para float para facilitar o trabalho do Pandas
+            return [{"data_registro": str(row["data_registro"]), "peso_total_dia": float(row["peso_total_dia"])} for row in cursor.fetchall()]    
 
     def close(self) -> None:
         """Encerra a pool (Chamado no teardown do lifespan)."""
@@ -160,6 +178,22 @@ class PostgresRepository:
                 (tenant_id, tenant_id),
             )
             return cursor.fetchall()
+        
+    def get_recent_incidents(self, limit: int = 5):
+            """Busca as ultimas ocorrencias para analise da IA."""
+            with self.pool.connection() as connection, connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT employee_description, contamination_level, estimated_quantity, priority 
+                    FROM incident 
+                    ORDER BY registered_at DESC 
+                    LIMIT %s;
+                    """,
+                    (limit,)
+                )
+                columns = [col.name for col in cursor.description]
+                results = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                return results            
 
 
 # ==============================================================================
@@ -251,8 +285,41 @@ class SessionRepository:
     def close(self) -> None:
         if self.client is not None:
             self.client.close()
-
-
+            
+    def save_incident(self, area_id: int, waste_type_id: int, photo_url: str, employee_description: str, contamination_level: str, estimated_quantity: float, priority: str, status: str = "REGISTRADA") -> int:
+        """Salva a ocorrencia confirmada no banco PostgreSQL."""
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO incident (
+                    area_id,
+                    waste_type_id,
+                    photo_url,
+                    employee_description,
+                    contamination_level,
+                    estimated_quantity,
+                    priority,
+                    status,
+                    registered_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                RETURNING id;
+                """,
+                (
+                    area_id,
+                    waste_type_id,
+                    photo_url,
+                    employee_description,
+                    contamination_level,
+                    estimated_quantity,
+                    priority,
+                    status,
+                )
+            )
+            incident_id = cursor.fetchone()[0]
+            connection.commit()
+            return incident_id    
+        
+                     
 # Instâncias globais
 db_postgres = PostgresRepository()
 db_mongo = SessionRepository()
