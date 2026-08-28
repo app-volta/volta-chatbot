@@ -1,6 +1,6 @@
 import base64
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
-from app.ai.predictive import prever_lotacao_cacamba
+from app.ai.predictive import prever_volume_futuro
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 from app.db.storage import db_postgres
@@ -144,7 +144,7 @@ def predict_area_capacity(
             detail="Dados insuficientes para prever o futuro desta cacamba."
         )
         
-    previsao = prever_lotacao_cacamba(dados_historicos, capacidade_maxima)
+    previsao = prever_volume_futuro(dados_historicos, capacidade_maxima)
     
     return previsao
 
