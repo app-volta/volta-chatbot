@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from typing import Any, TypeVar
 
-# Aqui está o segredo: Usamos o agente nativo do LangGraph no lugar do AgentExecutor antigo!
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
@@ -125,7 +124,12 @@ class AgentTeam:
 
         # 2. Especialistas com Tools -> Construídos nativamente com o LangGraph
         def _build_specialist(prompt_text, tools):
-            return create_react_agent(self.specialist_model, tools=tools, prompt=prompt_text)
+            return create_react_agent(
+                self.specialist_model, 
+                tools=tools, 
+                prompt=prompt_text,
+                response_format=SpecialistResult
+            )
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
         self.standards = _build_specialist(STANDARDS_PROMPT, [consultar_rag_operacional, consultar_rag_regulatorio])
@@ -145,22 +149,21 @@ class AgentTeam:
     def _invoke_specialist(self, name: str, executor: Any, model: str, payload: str) -> SpecialistResult:
         started = self.telemetry.timer()
         try:
-            # O React Agent do LangGraph espera as mensagens nesse formato
             result = executor.invoke({"messages": [("user", payload)]})
+            final_message = result["messages"][-1]
             
-            # A resposta final do agente fica na última mensagem devolvida
-            final_text = result["messages"][-1].content
-            
-            # Forçamos a saída para o formato estruturado Pydantic
-            structured_parser = self.specialist_model.with_structured_output(SpecialistResult)
-            parsed = structured_parser.invoke(f"Converta essa resposta para JSON: {final_text}")
+            if hasattr(final_message, "parsed") and final_message.parsed:
+                parsed = final_message.parsed
+            else:
+                structured_parser = self.specialist_model.with_structured_output(SpecialistResult)
+                parsed = structured_parser.invoke(f"Converta essa resposta para JSON: {final_message.content}")
             
             self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
             return parsed
         except Exception as exc:
-            print(f"\n❌❌❌ ERRO FATAL NO AGENTE {name} ❌❌❌")
+            print(f"\n[ERRO FATAL NO AGENTE {name}]")
             print(exc) 
-            print("❌" * 30 + "\n")
+            print("[/ERRO FATAL]\n")
 
             self.telemetry.record_agent(name, model, started, payload, str(exc), failed=True)
             raise RuntimeError(f"Falha controlada no especialista {name}.") from exc
