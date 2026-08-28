@@ -72,6 +72,7 @@ class AgentTeam:
                 timeout=45,
                 max_retries=2,
             )
+            self._specialist_primary_model = primary
             if self.settings.groq_api_key:
                 fallback = ChatGroq(
                     model=self.settings.groq_router_model,
@@ -80,9 +81,22 @@ class AgentTeam:
                     timeout=45,
                     max_retries=2,
                 )
+                self._specialist_fallback_model = fallback
                 return primary.with_fallbacks([fallback]), f"gemini:{self.settings.gemini_model}"
+            self._specialist_fallback_model = None
             return primary, f"gemini:{self.settings.gemini_model}"
-        return self._router_model()
+        model, model_name = self._router_model()
+        self._specialist_primary_model = model
+        self._specialist_fallback_model = None
+        return model, model_name
+
+    def _structured_specialist(self, schema: type[SchemaT]):
+        parser = self._specialist_primary_model.with_structured_output(schema)
+        if self._specialist_fallback_model is not None:
+            parser = parser.with_fallbacks([
+                self._specialist_fallback_model.with_structured_output(schema)
+            ])
+        return parser
 
     def _create_agents(self) -> None:
         @tool
@@ -121,7 +135,7 @@ class AgentTeam:
         self.router = prompt_router | self.router_model.with_structured_output(RouteDecision)
 
         prompt_judge = ChatPromptTemplate.from_messages([("system", JUDGE_PROMPT), ("user", "{input}")])
-        self.judge = prompt_judge | self.specialist_model.with_structured_output(JudgeVerdict)
+        self.judge = prompt_judge | self._structured_specialist(JudgeVerdict)
 
         prompt_orchestrator = ChatPromptTemplate.from_messages([("system", ORCHESTRATOR_PROMPT), ("user", "{input}")])
         self.orchestrator = prompt_orchestrator | self.router_model.with_structured_output(CorporateAnswer)
@@ -158,8 +172,13 @@ class AgentTeam:
             if hasattr(final_message, "parsed") and final_message.parsed:
                 parsed = final_message.parsed
             else:
-                structured_parser = self.specialist_model.with_structured_output(SpecialistResult)
-                parsed = structured_parser.invoke(f"Converta essa resposta para JSON: {final_message.content}")
+                structured_parser = self._structured_specialist(SpecialistResult)
+                parsed = structured_parser.invoke(
+                    "Converta a resposta abaixo para o schema SpecialistResult. "
+                    "Preencha metrics_summary com answer (texto completo), confidence "
+                    "(número de 0 a 1) e requires_human_validation=true; use null nos "
+                    f"demais campos quando não se aplicarem. Resposta: {final_message.content}"
+                )
             
             self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
             return parsed
