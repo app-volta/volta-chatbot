@@ -121,14 +121,22 @@ class AgentTeam:
                 return json.dumps({"erro": "Mês inválido"})
             if not tenant_id.strip():
                 return json.dumps({"erro": "tenant_id obrigatório"})
-            return json.dumps(self.postgres.consultar_metricas_esg(month, year, tenant_id), default=str, ensure_ascii=False)
+            try:
+                rows = self.postgres.consultar_metricas_esg(month, year, tenant_id)
+            except Exception:
+                return json.dumps({"erro": "Métricas ESG indisponíveis para consulta no momento."}, ensure_ascii=False)
+            return json.dumps(rows, default=str, ensure_ascii=False)
 
         @tool
         def consultar_performance_cooperativas(tenant_id: str) -> str:
             """Consulta indicadores de SLA e resposta de cooperativas no PostgreSQL."""
             if not tenant_id.strip():
                 return json.dumps({"erro": "tenant_id obrigatório"})
-            return json.dumps(self.postgres.consultar_performance_cooperativas(tenant_id), default=str, ensure_ascii=False)
+            try:
+                rows = self.postgres.consultar_performance_cooperativas(tenant_id)
+            except Exception:
+                return json.dumps({"erro": "Indicadores de cooperativas indisponíveis para consulta no momento."}, ensure_ascii=False)
+            return json.dumps(rows, default=str, ensure_ascii=False)
 
         # 1. Agentes Controladores -> Usam Structured Output puro
         prompt_router = ChatPromptTemplate.from_messages([("system", ROUTER_PROMPT.format(now=temporal_context())), ("user", "{input}")])
