@@ -101,16 +101,20 @@ class AgentTeam:
             return serialize_citations(self.rag.retrieve("cooperatives", query))
 
         @tool
-        def consultar_metricas_esg(month: int, year: int) -> str:
+        def consultar_metricas_esg(month: int, year: int, tenant_id: str) -> str:
             """Consulta agregados ESG de leitura no PostgreSQL. Mes deve estar entre 1 e 12."""
             if not 1 <= month <= 12:
                 return json.dumps({"erro": "Mês inválido"})
-            return json.dumps(self.postgres.consultar_metricas_esg(month, year), default=str, ensure_ascii=False)
+            if not tenant_id.strip():
+                return json.dumps({"erro": "tenant_id obrigatório"})
+            return json.dumps(self.postgres.consultar_metricas_esg(month, year, tenant_id), default=str, ensure_ascii=False)
 
         @tool
-        def consultar_performance_cooperativas() -> str:
+        def consultar_performance_cooperativas(tenant_id: str) -> str:
             """Consulta indicadores de SLA e resposta de cooperativas no PostgreSQL."""
-            return json.dumps(self.postgres.consultar_performance_cooperativas(), default=str, ensure_ascii=False)
+            if not tenant_id.strip():
+                return json.dumps({"erro": "tenant_id obrigatório"})
+            return json.dumps(self.postgres.consultar_performance_cooperativas(tenant_id), default=str, ensure_ascii=False)
 
         # 1. Agentes Controladores -> Usam Structured Output puro
         prompt_router = ChatPromptTemplate.from_messages([("system", ROUTER_PROMPT.format(now=temporal_context())), ("user", "{input}")])
@@ -171,9 +175,9 @@ class AgentTeam:
     def route(self, message: str) -> RouteDecision:
         return self._invoke_controller("router", self.router, self.router_model_name, f"Data UTC: {temporal_context()}\n\nMensagem: {message}")
 
-    def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None) -> SpecialistResult:
+    def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None, *, tenant_id: str) -> SpecialistResult:
         selected = {"triage": self.triage, "standards": self.standards, "data": self.data, "performance": self.performance}[route]
-        context = {"message": message, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
+        context = {"message": message, "tenant_id": tenant_id, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
         return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False))
 
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:

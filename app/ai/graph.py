@@ -76,12 +76,12 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
 
     def triage(state: VoltaState) -> dict:
         evidence = rag.retrieve_for_route("triage", state["clean_input"])
-        result = team.specialist("triage", state["clean_input"], evidence)
+        result = team.specialist("triage", state["clean_input"], evidence, tenant_id=state["tenant_id"])
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def standards(state: VoltaState) -> dict:
         evidence = rag.retrieve_for_route("standards", state["clean_input"])
-        result = team.specialist("standards", state["clean_input"], evidence)
+        result = team.specialist("standards", state["clean_input"], evidence, tenant_id=state["tenant_id"])
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def data(state: VoltaState) -> dict:
@@ -91,7 +91,7 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         except Exception:
             rows = [{"availability": "Dados indisponíveis para consulta no momento.", "month": month, "year": year}]
         evidence = [_db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)]
-        result = team.specialist("data", state["clean_input"], evidence, rows)
+        result = team.specialist("data", state["clean_input"], evidence, rows, tenant_id=state["tenant_id"])
         return {"evidence": evidence, "database_data": rows, "specialist": result}
 
     def performance(state: VoltaState) -> dict:
@@ -101,7 +101,7 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             rows = [{"availability": "Indicadores de cooperativas indisponíveis para consulta no momento."}]
         rag_evidence = rag.retrieve_for_route("performance", state["clean_input"])
         evidence = [_db_citation("Indicadores de cooperativas do PostgreSQL", "postgres-cooperatives", rows), *rag_evidence]
-        result = team.specialist("performance", state["clean_input"], evidence, rows)
+        result = team.specialist("performance", state["clean_input"], evidence, rows, tenant_id=state["tenant_id"])
         return {"evidence": evidence, "database_data": rows, "specialist": result}
 
     def judge(state: VoltaState) -> dict:
