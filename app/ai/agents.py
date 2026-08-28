@@ -131,8 +131,7 @@ class AgentTeam:
             return create_react_agent(
                 self.specialist_model, 
                 tools=tools, 
-                prompt=prompt_text,
-                response_format=SpecialistResult
+                prompt=prompt_text
             )
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
