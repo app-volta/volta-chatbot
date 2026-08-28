@@ -2,9 +2,9 @@ import pandas as pd
 from sklearn.linear_model import LinearRegression
 from datetime import timedelta
 
-def prever_lotacao_cacamba(dados_historicos: list[dict], capacidade_maxima_kg: float) -> dict:
+def prever_volume_futuro(dados_historicos: list[dict], dias_futuros: int = 7) -> dict:
     """
-    Recebe o historico do banco e preve em quantos dias a cacamba vai lotar.
+    Recebe o historico do banco e preve o volume acumulado de residuos em quilos para daqui a X dias.
     dados_historicos = [{"data_registro": "2026-08-10", "peso_total_dia": 35.5}, ...]
     """
     if not dados_historicos or len(dados_historicos) < 2:
@@ -16,6 +16,7 @@ def prever_lotacao_cacamba(dados_historicos: list[dict], capacidade_maxima_kg: f
     
     # 2. Converte as datas para dias passados a partir do primeiro registro
     data_inicial = df['data_registro'].min()
+    data_atual = df['data_registro'].max()
     df['dias_passados'] = (df['data_registro'] - data_inicial).dt.days
     
     # Acumula o peso dia apos dia
@@ -30,16 +31,18 @@ def prever_lotacao_cacamba(dados_historicos: list[dict], capacidade_maxima_kg: f
     
     taxa_crescimento_diaria = modelo.coef_[0]
     
-    if taxa_crescimento_diaria <= 0:
-        return {"alerta": False, "mensagem": "A geracao de residuos esta estavel ou caindo. Sem risco iminente de lotacao."}
-
-    # Calcula em qual dia o peso atinge a capacidade maxima
-    dias_para_lotar = (capacidade_maxima_kg - modelo.intercept_) / taxa_crescimento_diaria
+    # 4. Projeta o dia futuro com base no ultimo registro
+    dias_totais_ultimo_registro = (data_atual - data_inicial).days
+    dia_alvo = dias_totais_ultimo_registro + dias_futuros
     
-    data_prevista = data_inicial + timedelta(days=int(dias_para_lotar))
+    # Executa a predicao do modelo
+    volume_previsto = modelo.predict([[dia_alvo]])[0]
+    data_projetada = data_atual + timedelta(days=dias_futuros)
     
     return {
-        "alerta": True,
-        "data_estimada_lotacao": data_prevista.strftime("%Y-%m-%d"),
-        "taxa_geracao_diaria_kg": round(taxa_crescimento_diaria, 2)
+        "sucesso": True,
+        "dias_projetados": dias_futuros,
+        "data_projetada": data_projetada.strftime("%Y-%m-%d"),
+        "taxa_geracao_diaria_kg": round(float(taxa_crescimento_diaria), 2),
+        "volume_estimado_kg": round(float(volume_previsto), 2)
     }
