@@ -111,5 +111,7 @@ async def chat(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sessão não autorizada.") from exc
         
     except Exception as exc:
+        import traceback
+        traceback.print_exc()
         telemetry.record_request("unknown", started, "error")
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Não foi possível concluir a análise operacional.") from exc    
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Não foi possível concluir a análise operacional.") from exc

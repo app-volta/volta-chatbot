@@ -60,10 +60,16 @@ def _mask(pattern: re.Pattern[str], text: str, prefix: str, mapping: dict[str, s
 def guardrail_entrada(text: str) -> GuardrailResult:
     normalized = _normalize(text)
     if len(text.strip()) > 6000:
-        return GuardrailResult(blocked=True, sanitized_text="", reason="Mensagem excede o limite operacional permitido.")
+        return GuardrailResult(
+            blocked=True,
+            allowed=False,
+            sanitized_text="",
+            reason="Mensagem excede o limite operacional permitido.",
+        )
     if any(marker in normalized for marker in INJECTION_MARKERS):
         return GuardrailResult(
             blocked=True,
+            allowed=False,
             sanitized_text="",
             reason="VOLTA Security: tentativa de violação de diretriz detectada.",
         )
@@ -73,7 +79,7 @@ def guardrail_entrada(text: str) -> GuardrailResult:
     clean = _mask(CNPJ_RE, clean, "CNPJ", mapping, lambda value: _valid_document(value, 14))
     clean = _mask(EMAIL_RE, clean, "EMAIL", mapping)
     clean = _mask(PHONE_RE, clean, "TELEFONE", mapping)
-    return GuardrailResult(blocked=False, sanitized_text=clean, pii_tokens=mapping)
+    return GuardrailResult(blocked=False, allowed=True, sanitized_text=clean, pii_tokens=mapping)
 
 
 def guardrail_saida(text: str) -> str:
