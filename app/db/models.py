@@ -145,4 +145,7 @@ class CollectionRequest(BaseModel):
     
 class GuardrailResult(BaseModel):
     allowed: bool
+    blocked: bool = False
+    sanitized_text: str = ""
+    pii_tokens: dict[str, str] = Field(default_factory=dict)
     reason: str | None = None

@@ -72,6 +72,7 @@ class AgentTeam:
                 timeout=45,
                 max_retries=2,
             )
+            self._specialist_primary_model = primary
             if self.settings.groq_api_key:
                 fallback = ChatGroq(
                     model=self.settings.groq_router_model,
@@ -80,9 +81,22 @@ class AgentTeam:
                     timeout=45,
                     max_retries=2,
                 )
+                self._specialist_fallback_model = fallback
                 return primary.with_fallbacks([fallback]), f"gemini:{self.settings.gemini_model}"
+            self._specialist_fallback_model = None
             return primary, f"gemini:{self.settings.gemini_model}"
-        return self._router_model()
+        model, model_name = self._router_model()
+        self._specialist_primary_model = model
+        self._specialist_fallback_model = None
+        return model, model_name
+
+    def _structured_specialist(self, schema: type[SchemaT]):
+        parser = self._specialist_primary_model.with_structured_output(schema)
+        if self._specialist_fallback_model is not None:
+            parser = parser.with_fallbacks([
+                self._specialist_fallback_model.with_structured_output(schema)
+            ])
+        return parser
 
     def _create_agents(self) -> None:
         @tool
@@ -101,23 +115,35 @@ class AgentTeam:
             return serialize_citations(self.rag.retrieve("cooperatives", query))
 
         @tool
-        def consultar_metricas_esg(month: int, year: int) -> str:
+        def consultar_metricas_esg(month: int, year: int, tenant_id: str) -> str:
             """Consulta agregados ESG de leitura no PostgreSQL. Mes deve estar entre 1 e 12."""
             if not 1 <= month <= 12:
                 return json.dumps({"erro": "Mês inválido"})
-            return json.dumps(self.postgres.consultar_metricas_esg(month, year), default=str, ensure_ascii=False)
+            if not tenant_id.strip():
+                return json.dumps({"erro": "tenant_id obrigatório"})
+            try:
+                rows = self.postgres.consultar_metricas_esg(month, year, tenant_id)
+            except Exception:
+                return json.dumps({"erro": "Métricas ESG indisponíveis para consulta no momento."}, ensure_ascii=False)
+            return json.dumps(rows, default=str, ensure_ascii=False)
 
         @tool
-        def consultar_performance_cooperativas() -> str:
+        def consultar_performance_cooperativas(tenant_id: str) -> str:
             """Consulta indicadores de SLA e resposta de cooperativas no PostgreSQL."""
-            return json.dumps(self.postgres.consultar_performance_cooperativas(), default=str, ensure_ascii=False)
+            if not tenant_id.strip():
+                return json.dumps({"erro": "tenant_id obrigatório"})
+            try:
+                rows = self.postgres.consultar_performance_cooperativas(tenant_id)
+            except Exception:
+                return json.dumps({"erro": "Indicadores de cooperativas indisponíveis para consulta no momento."}, ensure_ascii=False)
+            return json.dumps(rows, default=str, ensure_ascii=False)
 
         # 1. Agentes Controladores -> Usam Structured Output puro
         prompt_router = ChatPromptTemplate.from_messages([("system", ROUTER_PROMPT.format(now=temporal_context())), ("user", "{input}")])
         self.router = prompt_router | self.router_model.with_structured_output(RouteDecision)
 
         prompt_judge = ChatPromptTemplate.from_messages([("system", JUDGE_PROMPT), ("user", "{input}")])
-        self.judge = prompt_judge | self.specialist_model.with_structured_output(JudgeVerdict)
+        self.judge = prompt_judge | self._structured_specialist(JudgeVerdict)
 
         prompt_orchestrator = ChatPromptTemplate.from_messages([("system", ORCHESTRATOR_PROMPT), ("user", "{input}")])
         self.orchestrator = prompt_orchestrator | self.router_model.with_structured_output(CorporateAnswer)
@@ -127,8 +153,7 @@ class AgentTeam:
             return create_react_agent(
                 self.specialist_model, 
                 tools=tools, 
-                prompt=prompt_text,
-                response_format=SpecialistResult
+                prompt=prompt_text
             )
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
@@ -155,8 +180,13 @@ class AgentTeam:
             if hasattr(final_message, "parsed") and final_message.parsed:
                 parsed = final_message.parsed
             else:
-                structured_parser = self.specialist_model.with_structured_output(SpecialistResult)
-                parsed = structured_parser.invoke(f"Converta essa resposta para JSON: {final_message.content}")
+                structured_parser = self._structured_specialist(SpecialistResult)
+                parsed = structured_parser.invoke(
+                    "Converta a resposta abaixo para o schema SpecialistResult. "
+                    "Preencha metrics_summary com answer (texto completo), confidence "
+                    "(número de 0 a 1) e requires_human_validation=true; use null nos "
+                    f"demais campos quando não se aplicarem. Resposta: {final_message.content}"
+                )
             
             self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
             return parsed
@@ -171,9 +201,9 @@ class AgentTeam:
     def route(self, message: str) -> RouteDecision:
         return self._invoke_controller("router", self.router, self.router_model_name, f"Data UTC: {temporal_context()}\n\nMensagem: {message}")
 
-    def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None) -> SpecialistResult:
+    def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None, *, tenant_id: str) -> SpecialistResult:
         selected = {"triage": self.triage, "standards": self.standards, "data": self.data, "performance": self.performance}[route]
-        context = {"message": message, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
+        context = {"message": message, "tenant_id": tenant_id, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
         return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False))
 
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:
