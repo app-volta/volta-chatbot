@@ -1,4 +1,6 @@
-from app.db.storage import PostgresRepository
+from uuid import UUID
+
+from app.db.storage import PostgresRepository, _company_id_from_tenant
 
 
 class FakeCursor:
@@ -57,11 +59,12 @@ def test_metric_query_uses_remote_esg_schema_and_company_scope():
         }]
     )
 
-    rows = repository.consultar_metricas_esg(8, 2026, "1")
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.consultar_metricas_esg(8, 2026, tenant_id)
 
     assert rows[0]["total_waste_kg"] == 155.5
     assert "FROM esg_metric" in repository.pool.cursor.sql
-    assert repository.pool.cursor.params == ("2026-08", 1, 1)
+    assert repository.pool.cursor.params == ("2026-08", UUID(tenant_id), UUID(tenant_id))
 
 
 def test_performance_query_uses_remote_collection_schema():
@@ -75,11 +78,12 @@ def test_performance_query_uses_remote_collection_schema():
         }]
     )
 
-    rows = repository.consultar_performance_cooperativas("1")
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.consultar_performance_cooperativas(tenant_id)
 
     assert rows[0]["cooperative_name"] == "Cooperativa Recicla SP"
     assert "FROM collection" in repository.pool.cursor.sql
-    assert repository.pool.cursor.params == (1, 1)
+    assert repository.pool.cursor.params == (UUID(tenant_id), UUID(tenant_id))
 
 
 def test_non_numeric_tenant_does_not_query_shared_schema():
@@ -96,8 +100,18 @@ def test_incident_history_applies_company_scope():
         [{"data_registro": "2026-08-01", "peso_total_dia": 10.0}]
     )
 
-    rows = repository.get_incident_history_by_area(4, "7")
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.get_incident_history_by_area(4, tenant_id)
 
     assert rows[0]["peso_total_dia"] == 10.0
     assert "company_id = %s" in repository.pool.cursor.sql
-    assert repository.pool.cursor.params == (4, 7, 7)
+    assert repository.pool.cursor.params == (4, UUID(tenant_id), UUID(tenant_id))
+
+
+def test_tenant_uuid_is_preserved_for_remote_schema():
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+
+    company_id = _company_id_from_tenant(tenant_id)
+
+    assert str(company_id) == tenant_id
+    assert isinstance(company_id, UUID)

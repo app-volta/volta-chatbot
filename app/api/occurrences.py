@@ -1,4 +1,5 @@
 import base64
+from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from app.ai.predictive import prever_volume_futuro
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -40,6 +41,8 @@ def create_occurrence_draft(
         company_id=payload.company_id, 
         area_id=payload.area_id, 
         user_id=payload.user_id, 
+        employee_description=payload.employee_description,
+        priority=payload.priority,
         ai_data=ai_dict
     )
     return OccurrenceDraftResponse(draft_id=draft_id, status="AGUARDANDO_VALIDACAO")
@@ -164,7 +167,7 @@ async def predict_waste(
 
 @router.get("/areas/{area_id}/predict_capacity")
 def predict_area_capacity(
-    area_id: int,
+    area_id: UUID,
     tenant_id: str = Query(..., min_length=1, max_length=128),
     capacidade_maxima: float = Query(default=1000.0, gt=0),
     dias_futuros: int = Query(default=7, ge=0, le=365),
