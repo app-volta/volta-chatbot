@@ -204,7 +204,7 @@ class AgentTeam:
     def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None, *, tenant_id: str) -> SpecialistResult:
         selected = {"triage": self.triage, "standards": self.standards, "data": self.data, "performance": self.performance}[route]
         context = {"message": message, "tenant_id": tenant_id, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
-        return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False))
+        return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
 
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:
         context = {
@@ -212,8 +212,8 @@ class AgentTeam:
             "evidence": [item.model_dump(mode="json") for item in evidence],
             "database_data": data or [],
         }
-        return self._invoke_controller("judge", self.judge, self.specialist_model_name, json.dumps(context, ensure_ascii=False))
+        return self._invoke_controller("judge", self.judge, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
 
     def format_answer(self, route: str, specialist: SpecialistResult | None, judge: JudgeVerdict | None, direct_reply: str | None = None) -> CorporateAnswer:
         context = {"route": route, "specialist": specialist.model_dump(mode="json") if specialist else None, "judge": judge.model_dump(mode="json") if judge else None, "direct_reply": direct_reply}
-        return self._invoke_controller("orchestrator", self.orchestrator, self.router_model_name, json.dumps(context, ensure_ascii=False))
+        return self._invoke_controller("orchestrator", self.orchestrator, self.router_model_name, json.dumps(context, ensure_ascii=False, default=str))
