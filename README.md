@@ -232,11 +232,13 @@ uvicorn app.main:app --reload
 Variáveis principais:
 
 ~~~env
-POSTGRES_URL=postgresql://volta:volta@localhost:5432/volta
-MONGO_URL=mongodb://localhost:27017/volta_memory
+POSTGRES_DSN=postgresql://volta:volta@localhost:5432/volta
+MONGO_URI=mongodb://localhost:27017/volta_memory
 GROQ_API_KEY=
 GEMINI_API_KEY=
 ~~~
+
+O Neon e o PostgreSQL oficial do projeto. O PostgreSQL do Docker e opcional para testes locais e usa o mesmo schema definido em `db/init.sql`.
 
 Nunca versione chaves, tokens, credenciais ou documentos internos.
 

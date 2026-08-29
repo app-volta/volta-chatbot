@@ -18,6 +18,16 @@ from pymongo.collection import Collection
 from app.db.models import ProposedOccurrence
 
 
+def _company_id_from_tenant(tenant_id: str | None) -> int | None:
+    """Mapeia o tenant do chatbot para company_id no schema compartilhado."""
+    if tenant_id is None:
+        return None
+    try:
+        return int(tenant_id)
+    except (TypeError, ValueError):
+        return None
+
+
 # ==============================================================================
 # POSTGRESQL (Transacional, RAG Tools e Ocorrências)
 # ==============================================================================
@@ -143,39 +153,56 @@ class PostgresRepository:
             return cursor.fetchall()    
         
     def consultar_metricas_esg(self, month: int, year: int, tenant_id: str | None = None) -> list[dict]:
+        company_id = _company_id_from_tenant(tenant_id)
+        if tenant_id is not None and company_id is None:
+            return []
+        period = f"{year:04d}-{month:02d}"
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT category,
-                       COUNT(*) AS ocorrencias_registradas,
-                       COALESCE(SUM(volume_kg), 0) AS volume_total_kg,
-                       COUNT(*) FILTER (WHERE contamination_risk) AS ocorrencias_com_risco
-                FROM occurrences
-                WHERE created_at >= make_date(%s, %s, 1)
-                  AND created_at < make_date(%s, %s, 1) + INTERVAL '1 month'
-                  AND (%s IS NULL OR tenant_id = %s)
-                GROUP BY category
-                ORDER BY volume_total_kg DESC
+                SELECT company_id,
+                       period,
+                       COALESCE(total_waste_kg, 0) AS total_waste_kg,
+                       COALESCE(total_recycled_kg, 0) AS total_recycled_kg,
+                       COALESCE(recycling_percentage, 0) AS recycling_percentage,
+                       calculated_at
+                FROM esg_metric
+                WHERE period = %s
+                  AND (%s IS NULL OR company_id = %s)
+                ORDER BY company_id
                 """,
-                (year, month, year, month, tenant_id, tenant_id),
+                (period, company_id, company_id),
             )
             rows = cursor.fetchall()
-            return [{**row, "volume_total_kg": float(row["volume_total_kg"])} for row in rows]
+            return [
+                {
+                    **row,
+                    "total_waste_kg": float(row["total_waste_kg"]),
+                    "total_recycled_kg": float(row["total_recycled_kg"]),
+                    "recycling_percentage": float(row["recycling_percentage"]),
+                }
+                for row in rows
+            ]
 
     def consultar_performance_cooperativas(self, tenant_id: str | None = None) -> list[dict]:
+        company_id = _company_id_from_tenant(tenant_id)
+        if tenant_id is not None and company_id is None:
+            return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT cooperative_name,
-                       COUNT(*) AS coletas_concluidas,
-                       ROUND(AVG(response_hours)::numeric, 2) AS tempo_medio_resposta_horas,
-                       ROUND(AVG(CASE WHEN sla_met THEN 1 ELSE 0 END)::numeric * 100, 2) AS cumprimento_sla_percentual
-                FROM cooperative_service_levels
-                WHERE (%s IS NULL OR tenant_id = %s)
-                GROUP BY cooperative_name
+                SELECT c.name AS cooperative_name,
+                       COUNT(*) FILTER (WHERE col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE')) AS coletas_concluidas,
+                       ROUND(AVG(EXTRACT(EPOCH FROM (col.scheduled_date - col.request_date)))::numeric / 3600, 2) AS tempo_medio_resposta_horas,
+                       ROUND(AVG(CASE WHEN col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE') THEN 1 ELSE 0 END)::numeric * 100, 2) AS cumprimento_sla_percentual
+                FROM collection col
+                JOIN cooperative c ON c.id = col.cooperative_id
+                JOIN incident i ON i.id = col.incident_id
+                WHERE (%s IS NULL OR i.company_id = %s)
+                GROUP BY c.name
                 ORDER BY cumprimento_sla_percentual DESC, tempo_medio_resposta_horas ASC
                 """,
-                (tenant_id, tenant_id),
+                (company_id, company_id),
             )
             return cursor.fetchall()
         
