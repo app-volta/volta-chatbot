@@ -88,3 +88,16 @@ def test_non_numeric_tenant_does_not_query_shared_schema():
 
     assert repository.consultar_metricas_esg(8, 2026, "jbs-demo") == []
     assert repository.pool.cursor.sql == ""
+
+
+def test_incident_history_applies_company_scope():
+    repository = PostgresRepository()
+    repository.pool = FakePool(
+        [{"data_registro": "2026-08-01", "peso_total_dia": 10.0}]
+    )
+
+    rows = repository.get_incident_history_by_area(4, "7")
+
+    assert rows[0]["peso_total_dia"] == 10.0
+    assert "company_id = %s" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (4, 7, 7)

@@ -2,7 +2,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-from typing import Optional
 from pydantic import BaseModel, Field
 
 # ==============================================================================
@@ -60,6 +59,7 @@ class CorporateAnswer(BaseModel):
     title: str | None = None
     answer: str
     recommended_actions: list[str] = Field(default_factory=list)
+    requires_human_validation: bool = True
 
 # ==============================================================================
 # O CONTRATO DA IA PREDITIVA (Visão Computacional)
@@ -71,7 +71,7 @@ class AnaliseResiduoIA(BaseModel):
     ai_contamination_level: str = Field(
         description="Nível de contaminação estimado: 'BAIXO', 'MEDIO' ou 'ALTO'."
     )
-    estimated_quantity_kg: Optional[float] = Field(
+    estimated_quantity_kg: float | None = Field(
         None, 
         description="Estimativa visual de peso em kg. Se não for possível deduzir pela imagem, retorne null."
     )
@@ -89,10 +89,10 @@ class AnaliseResiduoIA(BaseModel):
 # REQUESTS & RESPONSES (ENDPOINTS)
 # ==============================================================================
 class ChatRequest(BaseModel):
-    session_id: str
-    tenant_id: str
-    user_id: str
-    message: str
+    session_id: str = Field(min_length=1, max_length=128)
+    tenant_id: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=6000)
     image_base64: str | None = None
 
 class ChatResponse(BaseModel):

@@ -18,3 +18,5 @@ beautifulsoup4>=4.12
 pypdf>=5.0,<6.0
 mcp>=1.10,<2.0
 pytest>=8.3
+pandas>=2.2,<4.0
+scikit-learn>=1.5,<2.0

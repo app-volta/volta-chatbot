@@ -127,13 +127,7 @@ O módulo app/ai/predictive.py complementa o fluxo generativo com uma previsão 
 
 Esse módulo é acionado por app/api/occurrences.py no endpoint /v1/occurrences/areas/{area_id}/predict_capacity. O histórico é obtido do PostgreSQL e exige pelo menos dois registros. A previsão serve como apoio à decisão logística e não substitui medição física da caçamba ou conferência operacional.
 
-O retorno esperado contém sucesso, dias projetados, data projetada, taxa de geração diária em kg e volume estimado em kg. A capacidade máxima da área deve ser tratada como regra de negócio para calcular alerta de lotação; ela não deve ser confundida com a quantidade de dias da projeção.
-
-### Atenção na integração atual
-
-Na branch develop, o endpoint recebe capacidade_maxima, mas a chamada atual a repassa como o segundo argumento de prever_volume_futuro. Como a função interpreta esse argumento como dias_futuros, o contrato precisa ser ajustado antes de usar o alerta de lotação em produção. O ideal é separar explicitamente dias_futuros e capacidade_maxima e comparar o volume projetado com a capacidade da área.
-
-Outro ponto de implantação: predictive.py importa pandas e scikit-learn, mas essas dependências precisam estar declaradas no requirements.txt para que uma instalação limpa da branch develop consiga iniciar a API.
+O retorno contém sucesso, dias projetados, data projetada, taxa média diária, volume atual e volume estimado em kg. Quando `capacidade_maxima` é informada, também retorna o alerta de lotação, os dias restantes e a data estimada de lotação. O endpoint exige `tenant_id` para manter o histórico isolado por empresa.
 
 ## Memória e sessões
 
