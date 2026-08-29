@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, status, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.mongodb import MongoDBSaver
 
@@ -10,7 +11,7 @@ from app.ai.multi_rag import FederatedRag
 from app.ai.agents import AgentTeam
 from app.ai.graph import build_volta_graph
 from app.db.storage import db_postgres, db_mongo
-from app.api import sessions
+from app.api import sessions, observability
 
 
 @asynccontextmanager
@@ -81,3 +82,11 @@ def health() -> dict:
 app.include_router(chat.router, prefix="/v1/chat", tags=["Chat & IA"])
 app.include_router(occurrences.router, prefix="/v1/occurrences", tags=["Ocorrências"])
 app.include_router(sessions.router, prefix="/v1/sessions", tags=["Sessões"])
+app.include_router(observability.router, prefix="/v1/observability", tags=["Observabilidade"])
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Endpoint de scraping Prometheus sem conteúdo de requisições."""
+    payload, content_type = Observability.prometheus_payload()
+    return Response(content=payload, headers={"Content-Type": content_type})

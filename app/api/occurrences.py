@@ -17,7 +17,9 @@ from app.db.models import (
 # Repositorio, Injecao de Dependencia e Config
 from app.db.storage import PostgresRepository
 from app.core.dependencies import get_postgres
+from app.core.dependencies import get_telemetry
 from app.core.config import get_settings
+from app.core.observability import Observability
 
 router = APIRouter()
 
@@ -55,7 +57,8 @@ def list_occurrence_drafts(repository: PostgresRepository = Depends(get_postgres
 def approve_occurrence_draft(
     draft_id: int, 
     payload: ApprovalRequest,
-    repository: PostgresRepository = Depends(get_postgres)
+    repository: PostgresRepository = Depends(get_postgres),
+    telemetry: Observability = Depends(get_telemetry),
 ) -> ApprovalResponse:
     """
     REGRA DE NEGOCIO CRITICA (COMPLIANCE):
@@ -75,12 +78,16 @@ def approve_occurrence_draft(
             status_code=status.HTTP_409_CONFLICT, 
             detail="Rascunho ja processado."
         ) from exc
-        
+
+    telemetry.record_human_intervention("occurrence_approval")
     return ApprovalResponse(occurrence_id=occurrence_id, status="REGISTRADA")
 
 
 @router.post("/predict", response_model=AnaliseResiduoIA)
-async def predict_waste(file: UploadFile = File(...)):
+async def predict_waste(
+    file: UploadFile = File(...),
+    telemetry: Observability = Depends(get_telemetry),
+):
     """
     Recebe a foto do residuo (via celular do funcionario) e pede para o Gemini 
     analisar o nivel de risco, volume e tipo. Retorna um JSON estrito validado.
@@ -89,6 +96,8 @@ async def predict_waste(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Arquivo invalido. Por favor, envie uma imagem.")
 
+    started = telemetry.timer()
+    model_name = "gemini:visual-triage"
     try:
         # 2. Transforma a foto em Base64 para a IA conseguir enxergar
         image_bytes = await file.read()
@@ -96,6 +105,7 @@ async def predict_waste(file: UploadFile = File(...)):
 
         # 3. Puxa as configs do .env e liga a IA
         settings = get_settings()
+        model_name = f"gemini:{settings.gemini_model}"
         llm = ChatGoogleGenerativeAI(
             model=settings.gemini_model,
             temperature=0, 
@@ -121,9 +131,24 @@ async def predict_waste(file: UploadFile = File(...)):
 
         # 6. Manda bala e devolve pronto
         resultado = structured_llm.invoke([mensagem])
+        telemetry.record_agent(
+            "visual_triage",
+            model_name,
+            started,
+            "visual_triage_request",
+            resultado.model_dump_json(),
+        )
         return resultado
 
     except Exception as e:
+        telemetry.record_agent(
+            "visual_triage",
+            model_name,
+            started,
+            "visual_triage_request",
+            str(e),
+            failed=True,
+        )
         raise HTTPException(status_code=500, detail=f"Erro ao processar imagem na IA: {str(e)}")
 
 

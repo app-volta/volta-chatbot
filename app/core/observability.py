@@ -16,6 +16,13 @@ ERRORS = Counter("volta_errors_total", "Erros do VOLTA", ["component"])
 AGENT_LATENCY = Histogram("volta_agent_latency_seconds", "Latência por agente", ["agent"])
 TOTAL_LATENCY = Histogram("volta_total_latency_seconds", "Latência ponta a ponta")
 ESTIMATED_COST = Counter("volta_estimated_cost_usd_total", "Custo estimado de inferência", ["model"])
+JUDGE_RESULTS = Counter("volta_judge_results_total", "Resultados do agente juiz", ["approved"])
+HUMAN_INTERVENTIONS = Counter(
+    "volta_human_interventions_total",
+    "Casos encaminhados para validação humana",
+    ["reason"],
+)
+FALLBACKS = Counter("volta_fallbacks_total", "Fallbacks de provedor utilizados", ["agent", "provider"])
 
 
 @dataclass
@@ -26,6 +33,7 @@ class AgentMeasurement:
     input_tokens: int = 0
     output_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    fallback_calls: int = 0
 
 
 class Observability:
@@ -44,7 +52,16 @@ class Observability:
             return (input_tokens * self.settings.groq_input_usd_per_million + output_tokens * self.settings.groq_output_usd_per_million) / 1_000_000
         return (input_tokens * self.settings.gemini_input_usd_per_million + output_tokens * self.settings.gemini_output_usd_per_million) / 1_000_000
 
-    def record_agent(self, agent: str, model: str, started_at: float, prompt_text: str, response_text: str, failed: bool = False) -> None:
+    def record_agent(
+        self,
+        agent: str,
+        model: str,
+        started_at: float,
+        prompt_text: str,
+        response_text: str,
+        failed: bool = False,
+        fallback_used: bool = False,
+    ) -> None:
         latency = perf_counter() - started_at
         # Estimativa conservadora quando o provider não devolve usage_metadata.
         input_tokens = max(1, len(prompt_text) // 4)
@@ -58,10 +75,23 @@ class Observability:
             measurement.input_tokens += input_tokens
             measurement.output_tokens += output_tokens
             measurement.estimated_cost_usd += cost
+            measurement.fallback_calls += int(fallback_used)
         AGENT_LATENCY.labels(agent=agent).observe(latency)
         ESTIMATED_COST.labels(model=model).inc(cost)
         if failed:
             ERRORS.labels(component=agent).inc()
+        if fallback_used:
+            FALLBACKS.labels(agent=agent, provider=model).inc()
+
+    def record_judge(self, approved: bool, human_intervention: bool = False) -> None:
+        """Registra o resultado do juiz sem armazenar conteúdo da conversa."""
+        JUDGE_RESULTS.labels(approved=str(approved).lower()).inc()
+        if human_intervention:
+            self.record_human_intervention("judge_rejected")
+
+    @staticmethod
+    def record_human_intervention(reason: str) -> None:
+        HUMAN_INTERVENTIONS.labels(reason=reason).inc()
 
     def record_request(self, route: str, started_at: float, status: str, resolved: bool = False) -> None:
         latency = perf_counter() - started_at
@@ -87,6 +117,7 @@ class Observability:
                     "calls": value.calls,
                     "average_latency_ms": round(1000 * value.total_latency_seconds / value.calls, 2) if value.calls else 0,
                     "error_rate": round(value.errors / value.calls, 4) if value.calls else 0,
+                    "fallback_rate": round(value.fallback_calls / value.calls, 4) if value.calls else 0,
                 }
                 for name, value in self._agents.items()
             }
