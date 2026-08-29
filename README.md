@@ -94,6 +94,16 @@ Cada resultado deve preservar fonte, trecho, identificador do documento e metada
 
 A indexação esperada usa embeddings e FAISS. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
 
+### Ingestao local
+
+Coloque arquivos `.pdf`, `.txt` ou `.md` em um diretorio por corpus e execute:
+
+```bash
+python -m scripts.ingest_rag --corpus operational --directory data/documents/operational
+```
+
+Os indices FAISS e o manifesto de deduplicacao sao gravados em `data/faiss/<corpus>`. Os documentos fonte nao devem ser versionados quando contiverem dados internos.
+
 ## Modelo preditivo
 
 O módulo app/ai/predictive.py complementa o fluxo generativo com uma previsão numérica determinística. A função prever_volume_futuro:

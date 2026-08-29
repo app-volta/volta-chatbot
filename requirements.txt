@@ -15,5 +15,6 @@ pymongo>=4.10
 prometheus-client>=0.21
 httpx>=0.28
 beautifulsoup4>=4.12
+pypdf>=5.0,<6.0
 mcp>=1.10,<2.0
 pytest>=8.3
