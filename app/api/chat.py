@@ -94,6 +94,8 @@ async def chat(
         
         # 7. Finalização, persistência e resposta
         sessions.append_message(payload.session_id, "assistant", answer.answer, str(request_id))
+        if judge is not None:
+            telemetry.record_judge(judge.approved, human_intervention=not judge.approved)
         telemetry.record_request(route.value, started, "success", resolved=not judge or judge.approved)
         
         return ChatResponse(

@@ -266,6 +266,13 @@ O módulo de observabilidade deve registrar, por requisição e por agente:
 
 Os dados devem permitir acompanhar cenários de 100 a 1.000 usuários semanais sem registrar conteúdo sensível em logs.
 
+### Endpoints de observabilidade
+
+- `GET /metrics`: formato Prometheus para coleta de latência, chamadas, erros, custos, fallbacks e resultados do juiz.
+- `GET /v1/observability/summary?active_users=100&requests_per_user=5`: KPIs observados e projeção semanal de custo, ROI e custo por resolução.
+
+O resumo aceita de 100 a 1.000 usuários semanais. Nenhum endpoint de observabilidade retorna o conteúdo das mensagens ou dados pessoais.
+
 ## Testes recomendados
 
 O cliente e os testes devem cobrir, no mínimo:
