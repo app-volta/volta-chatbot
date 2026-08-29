@@ -1,5 +1,5 @@
 import base64
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from app.ai.predictive import prever_volume_futuro
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
@@ -22,6 +22,7 @@ from app.core.config import get_settings
 from app.core.observability import Observability
 
 router = APIRouter()
+MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 @router.post("/drafts", response_model=OccurrenceDraftResponse, status_code=status.HTTP_201_CREATED)
 def create_occurrence_draft(
@@ -93,23 +94,30 @@ async def predict_waste(
     analisar o nivel de risco, volume e tipo. Retorna um JSON estrito validado.
     """
     # 1. Valida se o que chegou e realmente uma imagem
-    if not file.content_type.startswith("image/"):
+    content_type = file.content_type or ""
+    if not content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Arquivo invalido. Por favor, envie uma imagem.")
 
     started = telemetry.timer()
     model_name = "gemini:visual-triage"
     try:
         # 2. Transforma a foto em Base64 para a IA conseguir enxergar
-        image_bytes = await file.read()
+        image_bytes = await file.read(MAX_IMAGE_BYTES + 1)
+        if not image_bytes:
+            raise HTTPException(status_code=400, detail="A imagem enviada esta vazia.")
+        if len(image_bytes) > MAX_IMAGE_BYTES:
+            raise HTTPException(status_code=413, detail="A imagem excede o limite de 10 MB.")
         image_data = base64.b64encode(image_bytes).decode("utf-8")
 
         # 3. Puxa as configs do .env e liga a IA
         settings = get_settings()
+        if settings.gemini_api_key is None:
+            raise HTTPException(status_code=503, detail="Analise visual indisponivel: provedor de IA nao configurado.")
         model_name = f"gemini:{settings.gemini_model}"
         llm = ChatGoogleGenerativeAI(
             model=settings.gemini_model,
             temperature=0, 
-            api_key=settings.gemini_api_key
+            api_key=settings.gemini_api_key.get_secret_value()
         )
 
         # 4. Forca a saida no formato do Pydantic
@@ -124,7 +132,7 @@ async def predict_waste(
                 },
                 {
                     "type": "image_url", 
-                    "image_url": f"data:{file.content_type};base64,{image_data}"
+                    "image_url": f"data:{content_type};base64,{image_data}"
                 }
             ]
         )
@@ -140,6 +148,8 @@ async def predict_waste(
         )
         return resultado
 
+    except HTTPException:
+        raise
     except Exception as e:
         telemetry.record_agent(
             "visual_triage",
@@ -149,19 +159,21 @@ async def predict_waste(
             str(e),
             failed=True,
         )
-        raise HTTPException(status_code=500, detail=f"Erro ao processar imagem na IA: {str(e)}")
+        raise HTTPException(status_code=502, detail="Nao foi possivel concluir a analise visual no momento.") from e
 
 
 @router.get("/areas/{area_id}/predict_capacity")
 def predict_area_capacity(
     area_id: int,
-    capacidade_maxima: float = 1000.0,
+    tenant_id: str = Query(..., min_length=1, max_length=128),
+    capacidade_maxima: float = Query(default=1000.0, gt=0),
+    dias_futuros: int = Query(default=7, ge=0, le=365),
     repository: PostgresRepository = Depends(get_postgres)
 ):
     """
     Busca o historico de lixo da area e preve quando a cacamba vai lotar.
     """
-    dados_historicos = repository.get_incident_history_by_area(area_id)
+    dados_historicos = repository.get_incident_history_by_area(area_id, tenant_id)
     
     if not dados_historicos or len(dados_historicos) < 2:
         raise HTTPException(
@@ -169,7 +181,11 @@ def predict_area_capacity(
             detail="Dados insuficientes para prever o futuro desta cacamba."
         )
         
-    previsao = prever_volume_futuro(dados_historicos, capacidade_maxima)
+    previsao = prever_volume_futuro(
+        dados_historicos,
+        dias_futuros=dias_futuros,
+        capacidade_maxima=capacidade_maxima,
+    )
     
     return previsao
 

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, HttpUrl, SecretStr
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -20,8 +20,14 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
     groq_router_model: str = "llama-3.3-70b-versatile"
 
-    postgres_dsn: SecretStr = SecretStr("postgresql://volta:volta@localhost:5432/volta")
-    mongo_uri: SecretStr = SecretStr("mongodb://localhost:27017/volta_memory?replicaSet=rs0")
+    postgres_dsn: SecretStr = Field(
+        default=SecretStr("postgresql://volta:volta@localhost:5432/volta"),
+        validation_alias=AliasChoices("POSTGRES_DSN", "POSTGRES_URL"),
+    )
+    mongo_uri: SecretStr = Field(
+        default=SecretStr("mongodb://localhost:27017/volta_memory?replicaSet=rs0"),
+        validation_alias=AliasChoices("MONGODB_URL", "MONGO_URI"),
+    )
 
     rag_base_path: str = "./data/faiss"
     source_download_timeout_seconds: int = 20
