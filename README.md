@@ -104,6 +104,16 @@ python -m scripts.ingest_rag --corpus operational --directory data/documents/ope
 
 Os indices FAISS e o manifesto de deduplicacao sao gravados em `data/faiss/<corpus>`. Os documentos fonte nao devem ser versionados quando contiverem dados internos.
 
+### Ingestao de fonte externa
+
+Para cumprir o requisito de fonte externa, use uma URL HTTPS cujo dominio esteja em `allowed_source_hosts` no `.env`/configuracao. O titulo informado sera preservado nas citacoes retornadas pelo agente:
+
+```bash
+python -m scripts.ingest_rag --corpus regulatory --url https://sdgs.un.org/goals/goal12 --title "ODS 12 - Sustainable Development Goal 12"
+```
+
+Redirecionamentos para dominios fora da allowlist sao bloqueados. Apos a ingestao, o agente de Normas recupera o trecho, a URL e o identificador da fonte; quando nao houver evidencia suficiente, deve declarar a limitacao.
+
 ## Modelo preditivo
 
 O módulo app/ai/predictive.py complementa o fluxo generativo com uma previsão numérica determinística. A função prever_volume_futuro:

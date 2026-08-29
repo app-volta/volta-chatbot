@@ -142,6 +142,8 @@ class FederatedRag:
         return self.ingest_documents(corpus, documents)
 
     def retrieve(self, corpus: Corpus, query: str, k: int = 4) -> list[SourceCitation]:
+        if not query.strip():
+            return []
         store = self._load(corpus)
         if not store:
             return []
@@ -170,7 +172,9 @@ class FederatedRag:
             "triage": ("operational",),
             "standards": ("operational", "regulatory"),
             "performance": ("cooperatives",),
-            "data": ("history",),
+            # O agente de Dados usa RAG apenas para contexto e definições;
+            # números e KPIs continuam vindo exclusivamente do PostgreSQL.
+            "data": ("regulatory", "history"),
         }
         citations: list[SourceCitation] = []
         for corpus in mapping.get(route, ()):
@@ -179,11 +183,20 @@ class FederatedRag:
 
     def ingest_external_url(self, corpus: Corpus, url: str, title: str) -> int:
         """Consome uma fonte externa por allowlist e a torna rastreável no RAG."""
-        host = urlparse(url).hostname or ""
+        parsed_url = urlparse(url)
+        host = parsed_url.hostname or ""
+        if parsed_url.scheme != "https":
+            raise ValueError("A fonte externa deve usar HTTPS.")
         if host not in self.settings.allowed_source_hosts:
             raise ValueError("Host não permitido para ingestão externa.")
+        clean_title = title.strip()
+        if not clean_title:
+            raise ValueError("O título da fonte externa é obrigatório.")
         response = httpx.get(url, timeout=self.settings.source_download_timeout_seconds, follow_redirects=True)
         response.raise_for_status()
+        final_host = urlparse(str(getattr(response, "url", url))).hostname or host
+        if final_host not in self.settings.allowed_source_hosts:
+            raise ValueError("O redirecionamento da fonte externa não é permitido.")
         soup = BeautifulSoup(response.text, "html.parser")
         for tag in soup(["script", "style", "nav", "footer"]):
             tag.decompose()
@@ -193,7 +206,7 @@ class FederatedRag:
         source_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
         return self.ingest_documents(
             corpus,
-            [Document(page_content=text, metadata={"source_id": source_id, "title": title, "url": url, "location": "página web"})],
+            [Document(page_content=text, metadata={"source_id": source_id, "title": clean_title, "url": url, "location": "página web"})],
         )
 
 

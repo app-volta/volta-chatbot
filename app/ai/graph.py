@@ -90,7 +90,9 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             rows = team.postgres.consultar_metricas_esg(month, year, state.get("tenant_id"))
         except Exception:
             rows = [{"availability": "Dados indisponíveis para consulta no momento.", "month": month, "year": year}]
-        evidence = [_db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)]
+        db_evidence = _db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)
+        contextual_evidence = rag.retrieve_for_route("data", state["clean_input"])
+        evidence = [db_evidence, *contextual_evidence]
         result = team.specialist("data", state["clean_input"], evidence, rows, tenant_id=state["tenant_id"])
         return {"evidence": evidence, "database_data": rows, "specialist": result}
 
