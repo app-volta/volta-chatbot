@@ -106,20 +106,22 @@ class ChatResponse(BaseModel):
     judge: JudgeVerdict | None = None
 
 class OccurrenceDraftCreate(BaseModel):
-    company_id: int
-    area_id: int
-    user_id: int
+    company_id: UUID
+    area_id: UUID
+    user_id: UUID
+    employee_description: str = Field(default="", max_length=2000)
+    priority: str = Field(default="MEDIA", min_length=1, max_length=30)
     ai_data: AnaliseResiduoIA 
 
 class OccurrenceDraftResponse(BaseModel):
-    draft_id: int
+    draft_id: UUID
     status: str
 
 class ApprovalRequest(BaseModel):
     approved_by: str
 
 class ApprovalResponse(BaseModel):
-    occurrence_id: int
+    occurrence_id: UUID
     status: str
 
 class SessionCreateRequest(BaseModel):

@@ -178,7 +178,7 @@ Exemplo de sessão:
 ~~~bash
 curl -X POST http://localhost:8000/v1/sessions ^
   -H "Content-Type: application/json" ^
-  -d "{\"session_id\":\"demo-001\"}"
+  -d "{\"tenant_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"user_id\":\"550e8400-e29b-41d4-a716-446655440002\"}"
 ~~~
 
 Exemplo de conversa:
@@ -186,7 +186,7 @@ Exemplo de conversa:
 ~~~bash
 curl -X POST http://localhost:8000/v1/chat ^
   -H "Content-Type: application/json" ^
-  -d "{\"session_id\":\"demo-001\",\"tenant_id\":\"jbs-demo\",\"user_id\":\"operador-01\",\"message\":\"Como devo tratar um plástico multicamada contaminado?\"}"
+  -d "{\"session_id\":\"demo-001\",\"tenant_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"user_id\":\"550e8400-e29b-41d4-a716-446655440002\",\"message\":\"Como devo tratar um plástico multicamada contaminado?\"}"
 ~~~
 
 ## Estrutura do código de IA
@@ -252,7 +252,7 @@ GROQ_API_KEY=
 GEMINI_API_KEY=
 ~~~
 
-O Neon e o PostgreSQL oficial do projeto. O PostgreSQL do Docker e opcional para testes locais e usa o mesmo schema definido em `db/init.sql`.
+O Neon e o PostgreSQL oficial do projeto. O schema remoto usa UUIDs e esta documentado em `db/schema_remote.md`; o `db/init.sql` reproduz essa estrutura para testes locais via Docker. Os identificadores de empresa, area e usuario usados pela API devem ser UUIDs validos.
 
 Nunca versione chaves, tokens, credenciais ou documentos internos.
 

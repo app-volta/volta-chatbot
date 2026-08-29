@@ -8,20 +8,23 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 
-def _company_id_from_tenant(tenant_id: str | None) -> int | None:
-    """Mapeia o tenant do chatbot para company_id no schema compartilhado."""
+def _company_id_from_tenant(tenant_id: str | None) -> UUID | None:
+    """Valida o tenant e preserva UUIDs usados pelo schema remoto."""
     if tenant_id is None:
         return None
+    value = tenant_id.strip()
+    if not value:
+        return None
     try:
-        return int(tenant_id)
-    except (TypeError, ValueError):
+        return UUID(value)
+    except ValueError:
         return None
 
 
@@ -42,7 +45,7 @@ class PostgresRepository:
             open=True,
         )
         
-    def get_incident_history_by_area(self, area_id: int, tenant_id: str | None = None) -> list[dict]:
+    def get_incident_history_by_area(self, area_id: UUID | str, tenant_id: str | None = None) -> list[dict]:
         """Busca o historico de peso de lixo de uma cacamba especifica para treinar a IA."""
         company_id = _company_id_from_tenant(tenant_id)
         if tenant_id is not None and company_id is None:
@@ -56,7 +59,7 @@ class PostgresRepository:
                 FROM incident
                 WHERE area_id = %s
                   AND estimated_quantity IS NOT NULL
-                  AND (%s IS NULL OR company_id = %s)
+                  AND (%s::uuid IS NULL OR company_id = %s)
                 GROUP BY DATE(registered_at)
                 ORDER BY data_registro ASC;
                 """,
@@ -81,27 +84,41 @@ class PostgresRepository:
             return False
 
     def create_occurrence_draft(
-        self, company_id: int, area_id: int, user_id: int, ai_data: dict
-    ) -> int:
+        self,
+        company_id: UUID | str,
+        area_id: UUID | str,
+        user_id: UUID | str,
+        employee_description: str,
+        priority: str,
+        ai_data: dict,
+    ) -> UUID | str:
         """Salva o rascunho do incidente e atrela o laudo da IA a ele."""
+        description = employee_description.strip() or str(ai_data.get("report_text", "")).strip()
+        if not description:
+            raise ValueError("employee_description e obrigatorio.")
+        clean_priority = priority.strip()
+        if not clean_priority:
+            raise ValueError("priority e obrigatorio.")
         with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
             # 1. Cria o incidente com status pendente (Aguardando validação humana)
             cursor.execute(
                 """
                 INSERT INTO incident (
-                    company_id, area_id, user_id, 
-                    contamination_level, estimated_quantity, status, registered_at
+                    company_id, area_id, user_id, employee_description,
+                    contamination_level, estimated_quantity, priority, status, registered_at
                 ) VALUES (
-                    %(company_id)s, %(area_id)s, %(user_id)s, 
-                    %(contamination)s, %(volume)s, 'AGUARDANDO_VALIDACAO', CURRENT_TIMESTAMP
+                    %(company_id)s, %(area_id)s, %(user_id)s, %(description)s,
+                    %(contamination)s, %(volume)s, %(priority)s, 'AGUARDANDO_VALIDACAO', CURRENT_TIMESTAMP
                 ) RETURNING id;
                 """,
                 {
                     "company_id": company_id,
                     "area_id": area_id,
                     "user_id": user_id,
+                    "description": description,
                     "contamination": ai_data.get("ai_contamination_level", "N/A"),
                     "volume": ai_data.get("estimated_quantity_kg", 0.0),
+                    "priority": clean_priority,
                 }
             )
             incident_id = cursor.fetchone()["id"]
@@ -127,7 +144,7 @@ class PostgresRepository:
             )
             return incident_id
 
-    def approve_occurrence_draft(self, draft_id: int) -> int:
+    def approve_occurrence_draft(self, draft_id: UUID | str) -> UUID | str:
         """Oficializa o registro mudando o status para REGISTRADA."""
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -170,7 +187,7 @@ class PostgresRepository:
                        calculated_at
                 FROM esg_metric
                 WHERE period = %s
-                  AND (%s IS NULL OR company_id = %s)
+                  AND (%s::uuid IS NULL OR company_id = %s)
                 ORDER BY company_id
                 """,
                 (period, company_id, company_id),
@@ -195,12 +212,12 @@ class PostgresRepository:
                 """
                 SELECT c.name AS cooperative_name,
                        COUNT(*) FILTER (WHERE col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE')) AS coletas_concluidas,
-                       ROUND(AVG(EXTRACT(EPOCH FROM (col.scheduled_date - col.request_date)))::numeric / 3600, 2) AS tempo_medio_resposta_horas,
+                       ROUND(AVG(EXTRACT(EPOCH FROM (col.scheduled_at - col.requested_at)))::numeric / 3600, 2) AS tempo_medio_resposta_horas,
                        ROUND(AVG(CASE WHEN col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE') THEN 1 ELSE 0 END)::numeric * 100, 2) AS cumprimento_sla_percentual
                 FROM collection col
                 JOIN cooperative c ON c.id = col.cooperative_id
                 JOIN incident i ON i.id = col.incident_id
-                WHERE (%s IS NULL OR i.company_id = %s)
+                WHERE (%s::uuid IS NULL OR i.company_id = %s)
                 GROUP BY c.name
                 ORDER BY cumprimento_sla_percentual DESC, tempo_medio_resposta_horas ASC
                 """,
@@ -226,28 +243,33 @@ class PostgresRepository:
 
     def save_incident(
         self,
-        area_id: int,
-        waste_type_id: int,
+        company_id: UUID | str,
+        area_id: UUID | str,
+        waste_type_id: UUID | str,
+        user_id: UUID | str,
         photo_url: str,
         employee_description: str,
         contamination_level: str,
         estimated_quantity: float,
         priority: str,
         status: str = "REGISTRADA",
-    ) -> int:
+    ) -> UUID | str:
         """Salva uma ocorrencia confirmada no banco PostgreSQL."""
         with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
             cursor.execute(
                 """
                 INSERT INTO incident (
-                    area_id, waste_type_id, photo_url, employee_description,
-                    contamination_level, estimated_quantity, priority, status, registered_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    company_id, area_id, waste_type_id, user_id, photo_url,
+                    employee_description, contamination_level, estimated_quantity,
+                    priority, status, registered_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 RETURNING id;
                 """,
                 (
+                    company_id,
                     area_id,
                     waste_type_id,
+                    user_id,
                     photo_url,
                     employee_description,
                     contamination_level,
