@@ -11,7 +11,9 @@ from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+from langchain_community.docstore.in_memory import InMemoryDocstore
 from langchain_community.vectorstores import FAISS
+from langchain_community.vectorstores.faiss import dependable_faiss_import
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -46,9 +48,79 @@ class FederatedRag:
         location = self._path(corpus)
         if not (location / "index.faiss").exists():
             return None
-        store = FAISS.load_local(str(location), self.embeddings, allow_dangerous_deserialization=False)
+        metadata_path = self._metadata_path(corpus)
+        if not metadata_path.exists():
+            raise RuntimeError(
+                f"Índice RAG legado em {location}; reindexe o corpus para gerar o formato seguro."
+            )
+        try:
+            payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("metadados devem ser um objeto JSON")
+            if payload.get("format_version") != 1:
+                raise ValueError("versão de metadados não suportada")
+            raw_documents = payload["documents"]
+            raw_mapping = payload["index_to_docstore_id"]
+            if not isinstance(raw_documents, list) or not isinstance(raw_mapping, dict):
+                raise ValueError("documentos ou mapeamento inválidos")
+            documents = {
+                item["id"]: Document(
+                    page_content=item["page_content"],
+                    metadata=item.get("metadata", {}),
+                )
+                for item in raw_documents
+                if isinstance(item, dict)
+                and isinstance(item.get("id"), str)
+                and isinstance(item.get("page_content"), str)
+                and isinstance(item.get("metadata", {}), dict)
+            }
+            mapping = {int(index): doc_id for index, doc_id in raw_mapping.items()}
+            if len(documents) != len(raw_documents) or set(mapping.values()) != set(documents):
+                raise ValueError("documentos ou mapeamento inválidos")
+        except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Metadados do índice RAG inválidos: {metadata_path}") from exc
+
+        faiss = dependable_faiss_import()
+        index = faiss.read_index(str(location / "index.faiss"))
+        if index.ntotal != len(mapping):
+            raise RuntimeError("Índice FAISS e metadados RAG estão inconsistentes; reindexe o corpus.")
+        store = FAISS(self.embeddings, index, InMemoryDocstore(documents), mapping)
         self._stores[corpus] = store
         return store
+
+    def _metadata_path(self, corpus: Corpus) -> Path:
+        return self._path(corpus) / "index.json"
+
+    def _save_store(self, corpus: Corpus, store: FAISS) -> None:
+        location = self._path(corpus)
+        location.mkdir(parents=True, exist_ok=True)
+        faiss = dependable_faiss_import()
+        faiss.write_index(store.index, str(location / "index.faiss"))
+        documents = []
+        for index, doc_id in sorted(store.index_to_docstore_id.items()):
+            document = store.docstore.search(doc_id)
+            if not isinstance(document, Document):
+                raise RuntimeError(f"Documento ausente no índice RAG: {doc_id}")
+            documents.append(
+                {
+                    "id": doc_id,
+                    "page_content": document.page_content,
+                    "metadata": document.metadata,
+                }
+            )
+        self._metadata_path(corpus).write_text(
+            json.dumps(
+                {
+                    "format_version": 1,
+                    "index_to_docstore_id": {str(index): doc_id for index, doc_id in store.index_to_docstore_id.items()},
+                    "documents": documents,
+                },
+                ensure_ascii=False,
+                indent=2,
+                default=str,
+            ),
+            encoding="utf-8",
+        )
 
     def _manifest_path(self, corpus: Corpus) -> Path:
         return self._path(corpus) / "manifest.json"
@@ -103,7 +175,7 @@ class FederatedRag:
         else:
             store = FAISS.from_documents(new_chunks, self.embeddings)
             self._stores[corpus] = store
-        store.save_local(str(self._path(corpus)))
+        self._save_store(corpus, store)
         self._save_manifest(corpus, known_ids)
         return len(new_chunks)
 
