@@ -82,7 +82,7 @@ class FederatedRag:
 
         faiss = dependable_faiss_import()
         index = faiss.read_index(str(location / "index.faiss"))
-        if index.ntotal != len(mapping):
+        if index.ntotal != len(mapping) or set(mapping) != set(range(index.ntotal)):
             raise RuntimeError("Índice FAISS e metadados RAG estão inconsistentes; reindexe o corpus.")
         store = FAISS(self.embeddings, index, InMemoryDocstore(documents), mapping)
         self._stores[corpus] = store
