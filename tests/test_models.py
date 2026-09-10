@@ -1,5 +1,7 @@
 from uuid import UUID
+from typing import get_type_hints
 
+from app.api.occurrences import approve_occurrence_draft
 from app.db.models import AnaliseResiduoIA, OccurrenceDraftCreate
 
 def test_analise_residuo_ia_deve_aceitar_mobile_summary():
@@ -34,3 +36,9 @@ def test_occurrence_draft_uses_remote_uuid_identifiers():
 
     assert isinstance(payload.company_id, UUID)
     assert payload.priority == "MEDIA"
+
+
+def test_approval_route_uses_uuid_path_parameter():
+    annotation = get_type_hints(approve_occurrence_draft)["draft_id"]
+
+    assert annotation is UUID
