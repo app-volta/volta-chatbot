@@ -108,6 +108,39 @@ def test_incident_history_applies_company_scope():
     assert repository.pool.cursor.params == (4, UUID(tenant_id), UUID(tenant_id))
 
 
+def test_draft_query_applies_company_scope():
+    repository = PostgresRepository()
+    repository.pool = FakePool([{"id": UUID("550e8400-e29b-41d4-a716-446655440001")}])
+
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.get_all_drafts(tenant_id)
+
+    assert rows
+    assert "i.company_id" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (UUID(tenant_id), UUID(tenant_id))
+
+
+def test_recent_incidents_query_applies_company_scope():
+    repository = PostgresRepository()
+    repository.pool = FakePool([{"employee_description": "Papelão"}])
+
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.get_recent_incidents(limit=5, tenant_id=tenant_id)
+
+    assert rows
+    assert "company_id = %s" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (UUID(tenant_id), UUID(tenant_id), 5)
+
+
+def test_draft_and_recent_queries_reject_invalid_tenant_before_database_call():
+    repository = PostgresRepository()
+    repository.pool = FakePool([])
+
+    assert repository.get_all_drafts("empresa-demo") == []
+    assert repository.get_recent_incidents(tenant_id="empresa-demo") == []
+    assert repository.pool.cursor.sql == ""
+
+
 def test_tenant_uuid_is_preserved_for_remote_schema():
     tenant_id = "550e8400-e29b-41d4-a716-446655440000"
 
