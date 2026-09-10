@@ -201,9 +201,24 @@ class AgentTeam:
     def route(self, message: str) -> RouteDecision:
         return self._invoke_controller("router", self.router, self.router_model_name, f"Data UTC: {temporal_context()}\n\nMensagem: {message}")
 
-    def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None, *, tenant_id: str) -> SpecialistResult:
+    def specialist(
+        self,
+        route: str,
+        message: str,
+        evidence: list,
+        data: list[dict] | None = None,
+        *,
+        tenant_id: str,
+        history: list[dict[str, str]] | None = None,
+    ) -> SpecialistResult:
         selected = {"triage": self.triage, "standards": self.standards, "data": self.data, "performance": self.performance}[route]
-        context = {"message": message, "tenant_id": tenant_id, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
+        context = {
+            "message": message,
+            "conversation_history": history or [],
+            "tenant_id": tenant_id,
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "database_data": data or [],
+        }
         return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
 
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:

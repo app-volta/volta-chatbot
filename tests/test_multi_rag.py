@@ -1,4 +1,7 @@
 from hashlib import sha256
+from pathlib import Path
+import subprocess
+import sys
 
 import httpx
 from langchain_core.embeddings import Embeddings
@@ -44,12 +47,39 @@ def test_ingest_directory_persists_and_deduplicates_chunks(tmp_path):
         "operational",
         "Plastic multilayer contaminated must remain segregated for technical evaluation.",
     )
+    script = f"""
+from hashlib import sha256
+from langchain_core.embeddings import Embeddings
+from app.ai.multi_rag import FederatedRag
+from app.core.config import Settings
+
+class FreshEmbeddings(Embeddings):
+    def _vector(self, text):
+        return [byte / 255 for byte in sha256(text.encode('utf-8')).digest()[:8]]
+    def embed_documents(self, texts):
+        return [self._vector(text) for text in texts]
+    def embed_query(self, text):
+        return self._vector(text)
+
+rag = FederatedRag(Settings(rag_base_path={str(tmp_path / 'faiss')!r}), embeddings=FreshEmbeddings())
+citations = rag.retrieve('operational', 'Plastic multilayer contaminated must remain segregated for technical evaluation.')
+assert citations and citations[0].title == 'manual'
+"""
+    fresh_process = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).parents[1],
+        capture_output=True,
+        text=True,
+    )
 
     assert first == 1
     assert second == 0
     assert citations
     assert citations[0].title == "manual"
+    assert fresh_process.returncode == 0, fresh_process.stderr
     assert (tmp_path / "faiss" / "operational" / "index.faiss").exists()
+    assert (tmp_path / "faiss" / "operational" / "index.json").exists()
+    assert not (tmp_path / "faiss" / "operational" / "index.pkl").exists()
     assert (tmp_path / "faiss" / "operational" / "manifest.json").exists()
 
 

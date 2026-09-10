@@ -25,6 +25,16 @@ from app.core.dependencies import get_sessions, get_telemetry, get_graph
 
 router = APIRouter()
 
+
+def _history_context(messages: list[dict]) -> list[dict[str, str]]:
+    """Keep a small, model-safe window of the conversation before the new input."""
+    return [
+        {"role": message["role"], "content": message["content"][:1000]}
+        for message in messages
+        if message.get("role") in {"user", "assistant"} and isinstance(message.get("content"), str)
+    ][-8:]
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
@@ -61,7 +71,8 @@ async def chat(
                 response=answer
             )
 
-        # 3. Histórico Seguro (Salvando apenas a mensagem já higienizada de PII)
+        # 3. Histórico Seguro: recupera o contexto anterior e persiste só o texto higienizado.
+        history = _history_context(sessions.recent_history(payload.session_id))
         sessions.append_message(payload.session_id, "user", outer_guardrail.sanitized_text, str(request_id))
         
         # 4. Estado inicial do Grafo (LangGraph)
@@ -72,6 +83,7 @@ async def chat(
             "tenant_id": payload.tenant_id,
             "session_id": payload.session_id,
             "input_text": outer_guardrail.sanitized_text,
+            "history": history,
         }
         
         config = {"configurable": {"thread_id": payload.session_id}}

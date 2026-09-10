@@ -59,7 +59,7 @@ def list_occurrence_drafts(repository: PostgresRepository = Depends(get_postgres
 
 @router.post("/drafts/{draft_id}/approve", response_model=ApprovalResponse)
 def approve_occurrence_draft(
-    draft_id: int, 
+    draft_id: UUID,
     payload: ApprovalRequest,
     repository: PostgresRepository = Depends(get_postgres),
     telemetry: Observability = Depends(get_telemetry),
