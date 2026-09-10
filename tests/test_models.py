@@ -2,6 +2,7 @@ from uuid import UUID
 from typing import get_type_hints
 
 from app.api.occurrences import approve_occurrence_draft
+from app.api.chat import _history_context
 from app.db.models import AnaliseResiduoIA, OccurrenceDraftCreate
 
 def test_analise_residuo_ia_deve_aceitar_mobile_summary():
@@ -42,3 +43,19 @@ def test_approval_route_uses_uuid_path_parameter():
     annotation = get_type_hints(approve_occurrence_draft)["draft_id"]
 
     assert annotation is UUID
+
+
+def test_history_context_keeps_only_bounded_user_and_assistant_messages():
+    messages = [
+        {"role": "system", "content": "ignore"},
+        {"role": "user", "content": "a" * 1200},
+        {"role": "assistant", "content": "resposta"},
+        {"role": "other", "content": "ignore"},
+    ]
+
+    context = _history_context(messages)
+
+    assert context == [
+        {"role": "user", "content": "a" * 1000},
+        {"role": "assistant", "content": "resposta"},
+    ]
