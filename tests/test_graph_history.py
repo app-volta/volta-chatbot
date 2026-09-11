@@ -5,7 +5,7 @@ from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, RouteNam
 
 
 class FakeRag:
-    def retrieve_for_route(self, route, message):
+    def retrieve_for_route(self, route, message, tenant_id=None):
         return []
 
 

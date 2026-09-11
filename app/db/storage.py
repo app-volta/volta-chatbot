@@ -361,11 +361,33 @@ class SessionRepository:
             }
         )
 
+    def session_history(self, session_id: str) -> list[dict]:
+        cursor = self.messages.find({"session_id": session_id}).sort("created_at", ASCENDING)
+        return [
+            {key: value for key, value in message.items() if key != "_id"}
+            for message in cursor
+        ]
+
     def recent_history(self, session_id: str, limit: int = 8) -> list[dict]:
         cursor = self.messages.find({"session_id": session_id}).sort("created_at", DESCENDING).limit(limit)
         return list(
             reversed([{key: value for key, value in message.items() if key != "_id"} for message in cursor])
         )
+
+    def close_session(self, session_id: str, tenant_id: str, user_id: str) -> datetime:
+        closed_at = datetime.now(UTC)
+        result = self.sessions.update_one(
+            {
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "closed_at": None,
+            },
+            {"$set": {"closed_at": closed_at}},
+        )
+        if result.modified_count != 1:
+            raise PermissionError("Sessão inexistente, encerrada ou não autorizada para este usuário.")
+        return closed_at
 
     def audit_security_event(self, session_id: str, event: str) -> None:
         self.audit.insert_one({"session_id": session_id, "event": event, "created_at": datetime.now(UTC)})

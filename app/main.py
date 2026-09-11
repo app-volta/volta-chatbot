@@ -34,6 +34,8 @@ async def lifespan(app: FastAPI):
 
     # 4. Registro no state para injeção de dependência nas rotas
     app.state.telemetry = telemetry
+    app.state.rag = rag
+    app.state.team = team
     app.state.graph = graph
 
     yield

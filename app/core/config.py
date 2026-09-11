@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     )
 
     rag_base_path: str = "./data/faiss"
+    qdrant_url: str | None = None
+    qdrant_api_key: SecretStr | None = None
+    qdrant_collection_prefix: str = "volta"
     source_download_timeout_seconds: int = 20
     allowed_source_hosts: set[str] = {"sdgs.un.org", "www.gov.br", "jbsesg.com", "ambientaljbs.com.br"}
 

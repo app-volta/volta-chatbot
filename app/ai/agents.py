@@ -20,11 +20,12 @@ from app.ai.prompts import (
     ORCHESTRATOR_PROMPT,
     PERFORMANCE_PROMPT,
     ROUTER_PROMPT,
+    SESSION_SUMMARY_PROMPT,
     STANDARDS_PROMPT,
     TRIAGE_PROMPT,
     temporal_context,
 )
-from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SpecialistResult
+from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SessionSummary, SpecialistResult
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
@@ -228,6 +229,26 @@ class AgentTeam:
             "database_data": data or [],
         }
         return self._invoke_controller("judge", self.judge, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
+
+    def summarize_session(self, messages: list[dict[str, Any]]) -> str:
+        context = [
+            {"role": message.get("role"), "content": str(message.get("content", ""))[:2000]}
+            for message in messages
+            if message.get("role") in {"user", "assistant"} and message.get("content")
+        ]
+        if not context:
+            return ""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SESSION_SUMMARY_PROMPT),
+            ("user", "Mensagens da sessão:\n{input}"),
+        ]) | self._structured_specialist(SessionSummary)
+        result = self._invoke_controller(
+            "session_summary",
+            prompt,
+            self.specialist_model_name,
+            json.dumps(context, ensure_ascii=False),
+        )
+        return result.summary.strip()
 
     def format_answer(self, route: str, specialist: SpecialistResult | None, judge: JudgeVerdict | None, direct_reply: str | None = None) -> CorporateAnswer:
         context = {"route": route, "specialist": specialist.model_dump(mode="json") if specialist else None, "judge": judge.model_dump(mode="json") if judge else None, "direct_reply": direct_reply}

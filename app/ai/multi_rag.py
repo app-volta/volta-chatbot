@@ -7,7 +7,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
+from uuid import NAMESPACE_URL, uuid5
 
 import httpx
 from bs4 import BeautifulSoup
@@ -18,6 +19,8 @@ from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
 
 from app.core.config import Settings
 from app.db.models import SourceCitation
@@ -38,6 +41,18 @@ class FederatedRag:
             google_api_key=settings.gemini_api_key.get_secret_value(),
         )
         self._stores: dict[Corpus, FAISS] = {}
+        self._qdrant: QdrantClient | None = None
+        if settings.qdrant_url:
+            qdrant_api_key = settings.qdrant_api_key.get_secret_value() if settings.qdrant_api_key else None
+            if settings.qdrant_url == ":memory:":
+                self._qdrant = QdrantClient(location=":memory:")
+            elif settings.qdrant_url.startswith("file://"):
+                self._qdrant = QdrantClient(path=unquote(urlparse(settings.qdrant_url).path))
+            else:
+                self._qdrant = QdrantClient(url=settings.qdrant_url, api_key=qdrant_api_key)
+
+    def _collection_name(self, corpus: Corpus) -> str:
+        return f"{self.settings.qdrant_collection_prefix}_{corpus}"
 
     def _path(self, corpus: Corpus) -> Path:
         return self.base_path / corpus
@@ -136,6 +151,7 @@ class FederatedRag:
             return set()
 
     def _save_manifest(self, corpus: Corpus, chunk_ids: set[str]) -> None:
+        self._manifest_path(corpus).parent.mkdir(parents=True, exist_ok=True)
         self._manifest_path(corpus).write_text(
             json.dumps({"chunk_ids": sorted(chunk_ids)}, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -168,6 +184,10 @@ class FederatedRag:
             known_ids.add(chunk_id)
         if not new_chunks:
             return 0
+        if self._qdrant is not None:
+            self._ingest_qdrant(corpus, new_chunks)
+            self._save_manifest(corpus, known_ids)
+            return len(new_chunks)
         current = self._load(corpus)
         if current:
             current.add_documents(new_chunks)
@@ -178,6 +198,30 @@ class FederatedRag:
         self._save_store(corpus, store)
         self._save_manifest(corpus, known_ids)
         return len(new_chunks)
+
+    def _ingest_qdrant(self, corpus: Corpus, chunks: list[Document]) -> None:
+        vectors = self.embeddings.embed_documents([chunk.page_content for chunk in chunks])
+        if not vectors or not vectors[0]:
+            raise RuntimeError("O modelo de embedding não retornou vetores válidos.")
+        vector_size = len(vectors[0])
+        if any(len(vector) != vector_size for vector in vectors):
+            raise RuntimeError("O modelo de embedding retornou dimensões inconsistentes.")
+
+        collection_name = self._collection_name(corpus)
+        if not self._qdrant.collection_exists(collection_name):
+            self._qdrant.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=vector_size, distance=Distance.COSINE),
+            )
+        points = [
+            PointStruct(
+                id=str(uuid5(NAMESPACE_URL, f"{collection_name}:{chunk.metadata['chunk_id']}")),
+                vector=vector,
+                payload={"page_content": chunk.page_content, "metadata": chunk.metadata},
+            )
+            for chunk, vector in zip(chunks, vectors, strict=True)
+        ]
+        self._qdrant.upsert(collection_name=collection_name, points=points, wait=True)
 
     def ingest_directory(self, corpus: Corpus, directory: str | Path) -> int:
         """Carrega TXT, Markdown e PDF de um diretório e indexa o corpus."""
@@ -213,18 +257,22 @@ class FederatedRag:
                         ))
         return self.ingest_documents(corpus, documents)
 
-    def retrieve(self, corpus: Corpus, query: str, k: int = 4) -> list[SourceCitation]:
+    def retrieve(self, corpus: Corpus, query: str, k: int = 4, tenant_id: str | None = None) -> list[SourceCitation]:
         if not query.strip():
             return []
+        if self._qdrant is not None:
+            return self._retrieve_qdrant(corpus, query, k, tenant_id)
         store = self._load(corpus)
         if not store:
             return []
-        results = store.similarity_search_with_relevance_scores(query, k=k)
+        results = store.similarity_search_with_relevance_scores(query, k=max(k * 4, k) if tenant_id else k)
         citations: list[SourceCitation] = []
         for document, score in results:
             if score < 0.35:
                 continue
             metadata = document.metadata
+            if tenant_id and metadata.get("tenant_id") != tenant_id:
+                continue
             citations.append(
                 SourceCitation(
                     source_id=str(metadata.get("source_id", "desconhecida")),
@@ -237,9 +285,47 @@ class FederatedRag:
                     retrieved_at=datetime.now(UTC),
                 )
             )
+            if len(citations) == k:
+                break
         return citations
 
-    def retrieve_for_route(self, route: str, query: str) -> list[SourceCitation]:
+    def _retrieve_qdrant(self, corpus: Corpus, query: str, k: int, tenant_id: str | None = None) -> list[SourceCitation]:
+        collection_name = self._collection_name(corpus)
+        if not self._qdrant.collection_exists(collection_name):
+            return []
+        vector = self.embeddings.embed_query(query)
+        query_filter = None
+        if tenant_id and corpus == "history":
+            query_filter = Filter(
+                must=[FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id))]
+            )
+        results = self._qdrant.query_points(
+            collection_name=collection_name,
+            query=vector,
+            limit=k,
+            with_payload=True,
+            score_threshold=0.35,
+            query_filter=query_filter,
+        ).points
+        citations: list[SourceCitation] = []
+        for result in results:
+            payload = result.payload or {}
+            metadata = payload.get("metadata", {})
+            citations.append(
+                SourceCitation(
+                    source_id=str(metadata.get("source_id", "desconhecida")),
+                    title=str(metadata.get("title", metadata.get("source", "Documento sem título"))),
+                    corpus=corpus,
+                    location=str(metadata.get("page", metadata.get("location", ""))) or None,
+                    url=metadata.get("url"),
+                    score=round(float(result.score), 3),
+                    excerpt=str(payload.get("page_content", ""))[:500],
+                    retrieved_at=datetime.now(UTC),
+                )
+            )
+        return citations
+
+    def retrieve_for_route(self, route: str, query: str, tenant_id: str | None = None) -> list[SourceCitation]:
         mapping: dict[str, tuple[Corpus, ...]] = {
             "triage": ("operational",),
             "standards": ("operational", "regulatory"),
@@ -250,7 +336,7 @@ class FederatedRag:
         }
         citations: list[SourceCitation] = []
         for corpus in mapping.get(route, ()):
-            citations.extend(self.retrieve(corpus, query))
+            citations.extend(self.retrieve(corpus, query, tenant_id=tenant_id))
         return citations
 
     def ingest_external_url(self, corpus: Corpus, url: str, title: str) -> int:

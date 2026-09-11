@@ -76,12 +76,12 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         return {"route": decision.route.value, "direct_reply": decision.direct_reply or ""}
 
     def triage(state: VoltaState) -> dict:
-        evidence = rag.retrieve_for_route("triage", state["clean_input"])
+        evidence = rag.retrieve_for_route("triage", state["clean_input"], state.get("tenant_id"))
         result = team.specialist("triage", state["clean_input"], evidence, tenant_id=state["tenant_id"], history=state.get("history", []))
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def standards(state: VoltaState) -> dict:
-        evidence = rag.retrieve_for_route("standards", state["clean_input"])
+        evidence = rag.retrieve_for_route("standards", state["clean_input"], state.get("tenant_id"))
         result = team.specialist("standards", state["clean_input"], evidence, tenant_id=state["tenant_id"], history=state.get("history", []))
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
@@ -92,7 +92,7 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         except Exception:
             rows = [{"availability": "Dados indisponíveis para consulta no momento.", "month": month, "year": year}]
         db_evidence = _db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)
-        contextual_evidence = rag.retrieve_for_route("data", state["clean_input"])
+        contextual_evidence = rag.retrieve_for_route("data", state["clean_input"], state.get("tenant_id"))
         evidence = [db_evidence, *contextual_evidence]
         result = team.specialist("data", state["clean_input"], evidence, rows, tenant_id=state["tenant_id"], history=state.get("history", []))
         return {"evidence": evidence, "database_data": rows, "specialist": result}
@@ -102,7 +102,7 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             rows = team.postgres.consultar_performance_cooperativas(state.get("tenant_id"))
         except Exception:
             rows = [{"availability": "Indicadores de cooperativas indisponíveis para consulta no momento."}]
-        rag_evidence = rag.retrieve_for_route("performance", state["clean_input"])
+        rag_evidence = rag.retrieve_for_route("performance", state["clean_input"], state.get("tenant_id"))
         evidence = [_db_citation("Indicadores de cooperativas do PostgreSQL", "postgres-cooperatives", rows), *rag_evidence]
         result = team.specialist("performance", state["clean_input"], evidence, rows, tenant_id=state["tenant_id"], history=state.get("history", []))
         return {"evidence": evidence, "database_data": rows, "specialist": result}
