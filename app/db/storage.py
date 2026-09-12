@@ -309,12 +309,10 @@ class SessionRepository:
         if clean_uri.endswith("?"):
             clean_uri = clean_uri[:-1]
 
-        self.client = MongoClient(
-            clean_uri,
-            directConnection=True,
-            serverSelectionTimeoutMS=5000,
-            appname="volta-api",
-        )
+        options = {"serverSelectionTimeoutMS": 5000, "appname": "volta-api"}
+        if not clean_uri.startswith("mongodb+srv://"):
+            options["directConnection"] = True
+        self.client = MongoClient(clean_uri, **options)
         database = self.client.get_database()
         self.sessions = database["sessions"]
         self.messages = database["chat_messages"]
