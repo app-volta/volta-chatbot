@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "VOLTA API"
-    environment: Literal["development", "test", "production"] = "development"
+    environment: Literal["qa", "prod"] = "qa"
     api_prefix: str = "/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
