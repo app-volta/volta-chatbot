@@ -216,32 +216,25 @@ volta-chatbot/
 ├── client.py                  # cliente e cenários de teste
 ├── tests/
 ├── db/init.sql
-├── docker-compose.yml
 └── requirements.txt
 ~~~
 
 ## Execução local
 
-1. Crie um arquivo .env com as credenciais e URLs dos serviços.
-2. Suba as dependências:
-
-~~~bash
-docker compose up -d postgres mongo mongo-init
-~~~
-
-3. Instale as dependências:
+1. Crie um arquivo `.env` com as credenciais e URLs dos serviços.
+2. Instale as dependências:
 
 ~~~bash
 python -m pip install -r requirements.txt
 ~~~
 
-4. Inicie a API:
+3. Inicie a API:
 
 ~~~bash
 uvicorn app.main:app --reload
 ~~~
 
-5. Abra a documentação interativa em http://localhost:8000/docs.
+4. Abra a documentação interativa em http://localhost:8000/docs.
 
 Variáveis principais:
 
@@ -252,7 +245,7 @@ GROQ_API_KEY=
 GEMINI_API_KEY=
 ~~~
 
-O Neon e o PostgreSQL oficial do projeto. O schema remoto usa UUIDs e esta documentado em `db/schema_remote.md`; o `db/init.sql` reproduz essa estrutura para testes locais via Docker. Os identificadores de empresa, area e usuario usados pela API devem ser UUIDs validos.
+O Neon e o PostgreSQL oficial do projeto. O schema remoto usa UUIDs e esta documentado em `db/schema_remote.md`; o `db/init.sql` reproduz essa estrutura para ambientes de teste. Os identificadores de empresa, area e usuario usados pela API devem ser UUIDs validos.
 
 Nunca versione chaves, tokens, credenciais ou documentos internos.
 
