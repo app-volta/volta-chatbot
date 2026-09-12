@@ -22,6 +22,9 @@ class FakeCursor:
     def fetchall(self):
         return self.rows
 
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
 
 class FakeConnection:
     def __init__(self, cursor):
@@ -106,6 +109,50 @@ def test_incident_history_applies_company_scope():
     assert rows[0]["peso_total_dia"] == 10.0
     assert "company_id = %s" in repository.pool.cursor.sql
     assert repository.pool.cursor.params == (4, UUID(tenant_id), UUID(tenant_id))
+
+
+def test_draft_query_applies_company_scope():
+    repository = PostgresRepository()
+    repository.pool = FakePool([{"id": UUID("550e8400-e29b-41d4-a716-446655440001")}])
+
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.get_all_drafts(tenant_id)
+
+    assert rows
+    assert "i.company_id" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (UUID(tenant_id), UUID(tenant_id))
+
+
+def test_recent_incidents_query_applies_company_scope():
+    repository = PostgresRepository()
+    repository.pool = FakePool([{"employee_description": "Papelão"}])
+
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    rows = repository.get_recent_incidents(limit=5, tenant_id=tenant_id)
+
+    assert rows
+    assert "company_id = %s" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (UUID(tenant_id), UUID(tenant_id), 5)
+
+
+def test_draft_and_recent_queries_reject_invalid_tenant_before_database_call():
+    repository = PostgresRepository()
+    repository.pool = FakePool([])
+
+    assert repository.get_all_drafts("empresa-demo") == []
+    assert repository.get_recent_incidents(tenant_id="empresa-demo") == []
+    assert repository.pool.cursor.sql == ""
+
+
+def test_draft_approval_applies_company_scope():
+    repository = PostgresRepository()
+    draft_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    repository.pool = FakePool([{"id": draft_id}])
+
+    assert repository.approve_occurrence_draft(draft_id, tenant_id) == draft_id
+    assert "company_id = %s" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (draft_id, UUID(tenant_id))
 
 
 def test_tenant_uuid_is_preserved_for_remote_schema():

@@ -4,8 +4,6 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, 
 from app.ai.predictive import prever_volume_futuro
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
-from app.db.storage import db_postgres
-
 # Nossos modelos Pydantic centralizados
 from app.db.models import (
     OccurrenceDraftCreate,
@@ -49,11 +47,14 @@ def create_occurrence_draft(
 
 
 @router.get("/drafts")
-def list_occurrence_drafts(repository: PostgresRepository = Depends(get_postgres)):
+def list_occurrence_drafts(
+    tenant_id: str = Query(..., min_length=1, max_length=128),
+    repository: PostgresRepository = Depends(get_postgres),
+):
     """
     Retorna os ultimos rascunhos cadastrados no banco para o Front-end renderizar a tela de aprovacao.
     """
-    drafts = repository.get_all_drafts()
+    drafts = repository.get_all_drafts(tenant_id)
     return {"total": len(drafts), "data": drafts}
 
 
@@ -61,6 +62,7 @@ def list_occurrence_drafts(repository: PostgresRepository = Depends(get_postgres
 def approve_occurrence_draft(
     draft_id: UUID,
     payload: ApprovalRequest,
+    tenant_id: str = Query(..., min_length=1, max_length=128),
     repository: PostgresRepository = Depends(get_postgres),
     telemetry: Observability = Depends(get_telemetry),
 ) -> ApprovalResponse:
@@ -71,7 +73,7 @@ def approve_occurrence_draft(
     gerado pela IA e oficializar o registro no PostgreSQL.
     """
     try:
-        occurrence_id = repository.approve_occurrence_draft(draft_id)
+        occurrence_id = repository.approve_occurrence_draft(draft_id, tenant_id)
     except LookupError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
@@ -193,9 +195,12 @@ def predict_area_capacity(
     return previsao
 
 @router.get("/reports/ai_summary")
-def generate_ai_management_summary():
+def generate_ai_management_summary(
+    tenant_id: str = Query(..., min_length=1, max_length=128),
+    repository: PostgresRepository = Depends(get_postgres),
+):
     
-    recent_data = db_postgres.get_recent_incidents(limit=5)
+    recent_data = repository.get_recent_incidents(limit=5, tenant_id=tenant_id)
     
     if not recent_data:
         return {"resumo": "Sem dados suficientes para analise."}

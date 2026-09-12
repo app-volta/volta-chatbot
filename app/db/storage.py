@@ -144,20 +144,26 @@ class PostgresRepository:
             )
             return incident_id
 
-    def approve_occurrence_draft(self, draft_id: UUID | str) -> UUID | str:
+    def approve_occurrence_draft(self, draft_id: UUID | str, tenant_id: str) -> UUID | str:
         """Oficializa o registro mudando o status para REGISTRADA."""
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            raise LookupError("Rascunho não encontrado.")
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s RETURNING id",
-                (draft_id,)
+                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s AND company_id = %s RETURNING id",
+                (draft_id, company_id),
             )
             updated = cursor.fetchone()
             if not updated:
                 raise LookupError("Rascunho não encontrado.")
             return updated["id"]
         
-    def get_all_drafts(self) -> list[dict]:
+    def get_all_drafts(self, tenant_id: str | None = None) -> list[dict]:
         """Busca os incidentes pendentes junto com o laudo da IA."""
+        company_id = _company_id_from_tenant(tenant_id)
+        if tenant_id is not None and company_id is None:
+            return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -166,8 +172,10 @@ class PostgresRepository:
                 FROM incident i
                 JOIN ai_report a ON i.id = a.incident_id
                 WHERE i.status = 'AGUARDANDO_VALIDACAO'
+                  AND (%s::uuid IS NULL OR i.company_id = %s)
                 ORDER BY i.registered_at DESC
-                """
+                """,
+                (company_id, company_id),
             )
             return cursor.fetchall()    
         
@@ -225,19 +233,23 @@ class PostgresRepository:
             )
             return cursor.fetchall()
         
-    def get_recent_incidents(self, limit: int = 5) -> list[dict]:
+    def get_recent_incidents(self, limit: int = 5, tenant_id: str | None = None) -> list[dict]:
         """Busca as ultimas ocorrencias para analise da IA."""
         if limit < 1:
+            return []
+        company_id = _company_id_from_tenant(tenant_id)
+        if tenant_id is not None and company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT employee_description, contamination_level, estimated_quantity, priority
                 FROM incident
+                WHERE (%s::uuid IS NULL OR company_id = %s)
                 ORDER BY registered_at DESC
                 LIMIT %s;
                 """,
-                (limit,),
+                (company_id, company_id, limit),
             )
             return cursor.fetchall()
 
