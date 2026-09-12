@@ -55,6 +55,31 @@ def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp
     assert rag.retrieve("history", "segregação do papelão", tenant_id="tenant-b") == []
 
 
+def test_qdrant_memory_preserves_faiss_sources_and_reaches_triage(tmp_path):
+    settings = Settings(
+        _env_file=None,
+        rag_base_path=str(tmp_path / "faiss"),
+        qdrant_url=":memory:",
+        qdrant_collection_prefix="test-volta",
+    )
+    rag = FederatedRag(settings, embeddings=ConstantEmbeddings())
+    rag.ingest_documents(
+        "history",
+        [Document(page_content="Histórico: papelão separado no setor A.", metadata={"title": "histórico", "tenant_id": "tenant-a"})],
+    )
+    rag.ingest_documents(
+        "operational",
+        [Document(page_content="Manual: papelão limpo segue para reciclagem.", metadata={"title": "manual"})],
+    )
+
+    tenant_a = rag.retrieve_for_route("triage", "papelão", tenant_id="tenant-a")
+    tenant_b = rag.retrieve_for_route("triage", "papelão", tenant_id="tenant-b")
+
+    assert {citation.title for citation in tenant_a} == {"histórico", "manual"}
+    assert [citation.title for citation in tenant_b] == ["manual"]
+    assert not rag._qdrant.collection_exists("test-volta_operational")
+
+
 def test_ingest_directory_persists_and_deduplicates_chunks(tmp_path):
     source = tmp_path / "documentos"
     source.mkdir()

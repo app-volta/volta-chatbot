@@ -52,4 +52,3 @@ def test_close_session_indexes_only_the_sanitized_summary():
     assert corpus == "history"
     assert documents[0].metadata["tenant_id"] == "tenant-a"
     assert documents[0].metadata["session_id"] == "session-1"
-

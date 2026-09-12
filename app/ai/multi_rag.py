@@ -184,7 +184,7 @@ class FederatedRag:
             known_ids.add(chunk_id)
         if not new_chunks:
             return 0
-        if self._qdrant is not None:
+        if self._qdrant is not None and corpus == "history":
             self._ingest_qdrant(corpus, new_chunks)
             self._save_manifest(corpus, known_ids)
             return len(new_chunks)
@@ -260,7 +260,7 @@ class FederatedRag:
     def retrieve(self, corpus: Corpus, query: str, k: int = 4, tenant_id: str | None = None) -> list[SourceCitation]:
         if not query.strip():
             return []
-        if self._qdrant is not None:
+        if self._qdrant is not None and corpus == "history":
             return self._retrieve_qdrant(corpus, query, k, tenant_id)
         store = self._load(corpus)
         if not store:
@@ -271,7 +271,7 @@ class FederatedRag:
             if score < 0.35:
                 continue
             metadata = document.metadata
-            if tenant_id and metadata.get("tenant_id") != tenant_id:
+            if tenant_id and corpus == "history" and metadata.get("tenant_id") != tenant_id:
                 continue
             citations.append(
                 SourceCitation(
@@ -327,9 +327,9 @@ class FederatedRag:
 
     def retrieve_for_route(self, route: str, query: str, tenant_id: str | None = None) -> list[SourceCitation]:
         mapping: dict[str, tuple[Corpus, ...]] = {
-            "triage": ("operational",),
-            "standards": ("operational", "regulatory"),
-            "performance": ("cooperatives",),
+            "triage": ("operational", "history"),
+            "standards": ("operational", "regulatory", "history"),
+            "performance": ("cooperatives", "history"),
             # O agente de Dados usa RAG apenas para contexto e definições;
             # números e KPIs continuam vindo exclusivamente do PostgreSQL.
             "data": ("regulatory", "history"),
