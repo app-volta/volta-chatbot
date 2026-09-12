@@ -62,6 +62,7 @@ def list_occurrence_drafts(
 def approve_occurrence_draft(
     draft_id: UUID,
     payload: ApprovalRequest,
+    tenant_id: str = Query(..., min_length=1, max_length=128),
     repository: PostgresRepository = Depends(get_postgres),
     telemetry: Observability = Depends(get_telemetry),
 ) -> ApprovalResponse:
@@ -72,7 +73,7 @@ def approve_occurrence_draft(
     gerado pela IA e oficializar o registro no PostgreSQL.
     """
     try:
-        occurrence_id = repository.approve_occurrence_draft(draft_id)
+        occurrence_id = repository.approve_occurrence_draft(draft_id, tenant_id)
     except LookupError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 

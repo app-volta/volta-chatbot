@@ -144,12 +144,15 @@ class PostgresRepository:
             )
             return incident_id
 
-    def approve_occurrence_draft(self, draft_id: UUID | str) -> UUID | str:
+    def approve_occurrence_draft(self, draft_id: UUID | str, tenant_id: str) -> UUID | str:
         """Oficializa o registro mudando o status para REGISTRADA."""
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            raise LookupError("Rascunho não encontrado.")
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s RETURNING id",
-                (draft_id,)
+                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s AND company_id = %s RETURNING id",
+                (draft_id, company_id),
             )
             updated = cursor.fetchone()
             if not updated:
