@@ -1,4 +1,5 @@
 import base64
+import json
 from uuid import UUID
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from app.ai.predictive import prever_volume_futuro
@@ -10,7 +11,8 @@ from app.db.models import (
     OccurrenceDraftResponse,
     ApprovalRequest,
     ApprovalResponse,
-    AnaliseResiduoIA  # <-- Nosso contrato da IA!
+    AnaliseResiduoIA,
+    AIManagementSummary,
 )
 
 # Repositorio, Injecao de Dependencia e Config
@@ -19,6 +21,7 @@ from app.core.dependencies import get_postgres
 from app.core.dependencies import get_telemetry
 from app.core.config import get_settings
 from app.core.observability import Observability
+from app.core.guardrails import guardrail_entrada
 
 router = APIRouter()
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
@@ -194,32 +197,64 @@ def predict_area_capacity(
     
     return previsao
 
-@router.get("/reports/ai_summary")
+@router.get("/reports/ai_summary", response_model=AIManagementSummary)
 def generate_ai_management_summary(
     tenant_id: str = Query(..., min_length=1, max_length=128),
     repository: PostgresRepository = Depends(get_postgres),
+    telemetry: Observability = Depends(get_telemetry),
 ):
-    
+
     recent_data = repository.get_recent_incidents(limit=5, tenant_id=tenant_id)
-    
+
     if not recent_data:
-        return {"resumo": "Sem dados suficientes para analise."}
-        
-    prompt = f"""
-    Aja como um analista de BI e Meio Ambiente.
-    Analise os seguintes registros recentes de descarte de residuos industriais:
-    {recent_data}
-    
-    Gere um JSON com as seguintes chaves:
-    1. "problema_analisado": Um resumo curto do padrao dos ultimos descartes.
-    2. "recomendacoes": Uma lista de 2 acoes preventivas para a equipe.
-    """
-    
-    # Aqui voce conecta com a sua chamada do Gemini ou com os Agentes do LangGraph
-    # resposta_ia = sua_funcao_ai(prompt)
-    
-    return {
-        "status": "sucesso",
-        "prompt_pronto": prompt,
-        "aviso": "Lembre de plugar a chamada real da IA aqui!"
-    }
+        return AIManagementSummary(
+            problema_analisado="Sem dados suficientes para análise.",
+            recomendacoes=[],
+        )
+
+    safe_data = []
+    for row in recent_data:
+        safe_row = dict(row)
+        description = str(safe_row.get("employee_description", ""))
+        safe_row["employee_description"] = guardrail_entrada(description).sanitized_text
+        safe_data.append(safe_row)
+
+    prompt = (
+        "Aja como um analista de BI e meio ambiente. Analise os registros recentes "
+        "de descarte de resíduos industriais abaixo. Retorne apenas o schema solicitado, "
+        "sem inventar métricas ausentes. Gere um resumo curto do padrão observado e "
+        "recomendações preventivas acionáveis.\n\n"
+        f"Registros: {json.dumps(safe_data, ensure_ascii=False, default=str)}"
+    )
+    settings = get_settings()
+    if settings.gemini_api_key is None:
+        raise HTTPException(status_code=503, detail="Relatório de IA indisponível: provedor não configurado.")
+
+    started = telemetry.timer()
+    model_name = f"gemini:{settings.gemini_model}"
+    try:
+        llm = ChatGoogleGenerativeAI(
+            model=settings.gemini_model,
+            temperature=0,
+            api_key=settings.gemini_api_key.get_secret_value(),
+        )
+        structured_llm = llm.with_structured_output(AIManagementSummary)
+        result = structured_llm.invoke([HumanMessage(content=prompt)])
+        telemetry.record_agent(
+            "ai_management_summary",
+            model_name,
+            started,
+            "ai_management_summary_request",
+            result.model_dump_json(),
+        )
+        return result
+    except Exception as exc:
+        telemetry.record_agent(
+            "ai_management_summary",
+            model_name,
+            started,
+            "ai_management_summary_request",
+            str(exc),
+            failed=True,
+        )
+        raise HTTPException(status_code=502, detail="Não foi possível gerar o relatório de IA.") from exc
