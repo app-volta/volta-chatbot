@@ -90,8 +90,6 @@ class AnaliseResiduoIA(BaseModel):
 # ==============================================================================
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
-    tenant_id: str = Field(min_length=1, max_length=128)
-    user_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=6000)
     image_base64: str | None = None
 
@@ -111,9 +109,7 @@ class AIManagementSummary(BaseModel):
     recomendacoes: list[str] = Field(default_factory=list, max_length=5)
 
 class OccurrenceDraftCreate(BaseModel):
-    company_id: UUID
     area_id: UUID
-    user_id: UUID
     employee_description: str = Field(default="", max_length=2000)
     priority: str = Field(default="MEDIA", min_length=1, max_length=30)
     ai_data: AnaliseResiduoIA 
@@ -122,20 +118,9 @@ class OccurrenceDraftResponse(BaseModel):
     draft_id: UUID
     status: str
 
-class ApprovalRequest(BaseModel):
-    approved_by: str
-
 class ApprovalResponse(BaseModel):
     occurrence_id: UUID
     status: str
-
-class SessionCreateRequest(BaseModel):
-    tenant_id: str
-    user_id: str
-
-class SessionCloseRequest(BaseModel):
-    tenant_id: str
-    user_id: str
 
 class SessionResponse(BaseModel):
     session_id: str

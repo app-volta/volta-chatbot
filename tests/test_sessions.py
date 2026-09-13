@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 
 from app.api.sessions import close
-from app.db.models import SessionCloseRequest
+from app.core.auth import RequestIdentity
 
 
 class FakeSessions:
@@ -39,7 +39,7 @@ def test_close_session_indexes_only_the_sanitized_summary():
 
     response = close(
         "session-1",
-        SessionCloseRequest(tenant_id="tenant-a", user_id="user-1"),
+        RequestIdentity(tenant_id="tenant-a", user_id="user-1"),
         sessions=sessions,
         rag=rag,
         team=FakeTeam(),

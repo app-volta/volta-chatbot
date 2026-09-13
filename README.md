@@ -127,7 +127,7 @@ O módulo app/ai/predictive.py complementa o fluxo generativo com uma previsão 
 
 Esse módulo é acionado por app/api/occurrences.py no endpoint /v1/occurrences/areas/{area_id}/predict_capacity. O histórico é obtido do PostgreSQL e exige pelo menos dois registros. A previsão serve como apoio à decisão logística e não substitui medição física da caçamba ou conferência operacional.
 
-O retorno contém sucesso, dias projetados, data projetada, taxa média diária, volume atual e volume estimado em kg. Quando `capacidade_maxima` é informada, também retorna o alerta de lotação, os dias restantes e a data estimada de lotação. O endpoint exige `tenant_id` para manter o histórico isolado por empresa.
+O retorno contém sucesso, dias projetados, data projetada, taxa média diária, volume atual e volume estimado em kg. Quando `capacidade_maxima` é informada, também retorna o alerta de lotação, os dias restantes e a data estimada de lotação. O histórico é limitado à empresa do usuário autenticado.
 
 ## Memória e sessões
 
@@ -177,17 +177,19 @@ Exemplo de sessão:
 
 ~~~bash
 curl -X POST http://localhost:8000/v1/sessions ^
-  -H "Content-Type: application/json" ^
-  -d "{\"tenant_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"user_id\":\"550e8400-e29b-41d4-a716-446655440002\"}"
+  -H "Authorization: Bearer <jwt-da-volta-api>"
 ~~~
 
 Exemplo de conversa:
 
 ~~~bash
 curl -X POST http://localhost:8000/v1/chat ^
+  -H "Authorization: Bearer <jwt-da-volta-api>" ^
   -H "Content-Type: application/json" ^
-  -d "{\"session_id\":\"demo-001\",\"tenant_id\":\"550e8400-e29b-41d4-a716-446655440000\",\"user_id\":\"550e8400-e29b-41d4-a716-446655440002\",\"message\":\"Como devo tratar um plástico multicamada contaminado?\"}"
+  -d "{\"session_id\":\"demo-001\",\"message\":\"Como devo tratar um plástico multicamada contaminado?\"}"
 ~~~
+
+Todas as rotas de negócio exigem `Authorization: Bearer <jwt-da-volta-api>`. O chatbot valida a assinatura e a expiração do JWT emitido pela `volta-api`, usa o e-mail do `sub` para buscar os UUIDs atuais em `users.id` e `users.company_id`, e deriva deles o usuário e a empresa. `tenant_id`, `user_id` e `company_id` enviados pelo cliente não definem o escopo autorizado. Configure `JWT_KEY` no secret `chatbot-secrets` com o mesmo valor usado pela `volta-api`; nunca versione essa chave.
 
 ## Estrutura do código de IA
 
@@ -201,7 +203,6 @@ volta-chatbot/
 │   │   ├── predictive.py      # previsão de volume e capacidade
 │   │   ├── prompts.py         # prompts dos agentes
 │   │   ├── integrations.py    # modelos e integrações externas
-│   │   └── mcp_server.py      # exposição de tools via MCP
 │   ├── api/
 │   │   ├── chat.py            # endpoint do chatbot
 │   │   ├── sessions.py        # sessões e histórico
@@ -241,6 +242,7 @@ Variáveis principais:
 ~~~env
 POSTGRES_DSN=postgresql://volta:volta@localhost:5432/volta
 MONGO_URI=mongodb://localhost:27017/volta_memory
+JWT_KEY=
 GROQ_API_KEY=
 GEMINI_API_KEY=
 ~~~

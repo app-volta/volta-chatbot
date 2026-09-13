@@ -1,6 +1,7 @@
 from pydantic import SecretStr
 
 from app.api import occurrences
+from app.core.auth import RequestIdentity
 from app.core.config import Settings
 from app.db.models import AIManagementSummary
 
@@ -61,7 +62,10 @@ def test_ai_summary_calls_structured_model_with_scoped_sanitized_data(monkeypatc
     monkeypatch.setattr(occurrences, "ChatGoogleGenerativeAI", FakeModel)
 
     result = occurrences.generate_ai_management_summary(
-        "550e8400-e29b-41d4-a716-446655440000",
+        RequestIdentity(
+            tenant_id="550e8400-e29b-41d4-a716-446655440000",
+            user_id="550e8400-e29b-41d4-a716-446655440002",
+        ),
         repository,
         telemetry,
     )

@@ -83,6 +83,15 @@ class PostgresRepository:
         except Exception:
             return False
 
+    def get_user_identity_by_email(self, email: str) -> dict | None:
+        """Resolve a identidade do JWT para os UUIDs atuais do usuário e da empresa."""
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id AS user_id, company_id AS tenant_id FROM users WHERE email = %s LIMIT 1",
+                (email,),
+            )
+            return cursor.fetchone()
+
     def create_occurrence_draft(
         self,
         company_id: UUID | str,
@@ -100,6 +109,13 @@ class PostgresRepository:
         if not clean_priority:
             raise ValueError("priority e obrigatorio.")
         with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM area WHERE id = %s AND company_id = %s",
+                (area_id, company_id),
+            )
+            if not cursor.fetchone():
+                raise LookupError("Área não encontrada para esta empresa.")
+
             # 1. Cria o incidente com status pendente (Aguardando validação humana)
             cursor.execute(
                 """

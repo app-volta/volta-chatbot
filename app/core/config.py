@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     cooperative_a2a_hmac_secret: SecretStr | None = None
     a2a_timeout_seconds: int = 10
     ingestion_api_key: SecretStr | None = None
+    jwt_key: SecretStr | None = Field(default=None, validation_alias="JWT_KEY")
 
     # Estimativas configuráveis, para o painel acadêmico de custo/ROI.
     gemini_input_usd_per_million: float = 0.30
