@@ -1,5 +1,6 @@
 from uuid import UUID
 
+from app.db import storage
 from app.db.storage import PostgresRepository, _company_id_from_tenant
 
 
@@ -162,3 +163,22 @@ def test_tenant_uuid_is_preserved_for_remote_schema():
 
     assert str(company_id) == tenant_id
     assert isinstance(company_id, UUID)
+
+
+def test_mongodb_srv_connection_does_not_force_direct_connection(monkeypatch):
+    captured = {}
+
+    class FakeMongoClient:
+        def __init__(self, uri, **options):
+            captured["uri"] = uri
+            captured["options"] = options
+
+        def get_database(self):
+            return {"sessions": object(), "chat_messages": object(), "security_audit": object()}
+
+    monkeypatch.setattr(storage, "MongoClient", FakeMongoClient)
+
+    storage.SessionRepository().open("mongodb+srv://user:password@cluster.example.net/volta")
+
+    assert captured["uri"].startswith("mongodb+srv://")
+    assert "directConnection" not in captured["options"]

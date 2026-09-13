@@ -133,11 +133,23 @@ class SessionCreateRequest(BaseModel):
     tenant_id: str
     user_id: str
 
+class SessionCloseRequest(BaseModel):
+    tenant_id: str
+    user_id: str
+
 class SessionResponse(BaseModel):
     session_id: str
     tenant_id: str
     user_id: str
     created_at: datetime
+
+class SessionCloseResponse(BaseModel):
+    session_id: str
+    closed_at: datetime
+    summary_indexed: bool
+
+class SessionSummary(BaseModel):
+    summary: str = Field(min_length=1, max_length=4000)
 
 class ExternalSourceRequest(BaseModel):
     corpus: Literal["operational", "regulatory", "cooperatives", "history"]
