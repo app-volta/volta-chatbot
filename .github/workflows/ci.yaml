@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   validate-pr:
-    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@v1
+    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@7a05f44d91a20cfd124daae92e4a4a94f2d4b5db
     secrets: inherit
 
   build:
