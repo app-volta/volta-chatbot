@@ -77,7 +77,7 @@ Os agentes se comunicam por objetos Pydantic, evitando dependência de texto liv
 - SpecialistResult: análise de triagem, resumo de métricas, proposta de ocorrência e fontes;
 - JudgeVerdict: aprovação ou reprovação da resposta e justificativa;
 - CorporateAnswer: título, resposta final, ações recomendadas e fontes;
-- ChatRequest: sessão, tenant, usuário, mensagem e imagem opcional.
+- ChatRequest: sessão, mensagem e imagem opcional; usuário e empresa vêm do JWT validado.
 
 Uma ocorrência criada pela IA é sempre uma proposta ou rascunho. O status inicial deve permanecer AGUARDANDO_VALIDACAO até a aprovação de um responsável.
 
