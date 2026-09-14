@@ -36,4 +36,4 @@ jobs:
         run: python -c "from app.main import app"
 
       - name: Executar testes
-        run: pytest -q
+        run: python -m pytest -q
