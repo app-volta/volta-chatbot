@@ -9,10 +9,12 @@ def test_settings_accepts_project_database_variable_names() -> None:
         _env_file=None,
         MONGODB_URL="mongodb://remote.example/volta",
         POSTGRES_URL="postgresql://remote.example/volta",
+        JWT_KEY="secret",
     )
 
     assert settings.mongodb_url == "mongodb://remote.example/volta"
     assert settings.postgres_url == "postgresql://remote.example/volta"
+    assert settings.jwt_key is not None
 
 
 @pytest.mark.parametrize("environment", ["qa", "prod"])

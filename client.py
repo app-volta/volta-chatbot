@@ -1,12 +1,19 @@
 import requests
-import json
+import os
 
 BASE_URL = "http://127.0.0.1:8000"
+TOKEN = os.getenv("VOLTA_JWT")
+
+if not TOKEN:
+    raise SystemExit("Defina VOLTA_JWT com um JWT válido emitido pela volta-api.")
+
+HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
 print("🤖 Iniciando o VOLTA Chat...")
 
 # 1. Cria a sessão automaticamente
-sessao_response = requests.post(f"{BASE_URL}/v1/sessions", json={"tenant_id": "fabrica_sp_01", "user_id": "operador_teste"})
+sessao_response = requests.post(f"{BASE_URL}/v1/sessions", headers=HEADERS)
+sessao_response.raise_for_status()
 sessao_id = sessao_response.json()["session_id"]
 print(f"✅ Sessão criada! ID: {sessao_id}\n")
 print("Digite 'sair' para encerrar.\n")
@@ -22,13 +29,11 @@ while True:
         
     payload = {
         "session_id": sessao_id,
-        "tenant_id": "fabrica_sp_01",
-        "user_id": "operador_teste",
         "message": pergunta
     }
     
     # 3. Envia para a API e espera a resposta
-    resposta = requests.post(f"{BASE_URL}/v1/chat", json=payload)
+    resposta = requests.post(f"{BASE_URL}/v1/chat", headers=HEADERS, json=payload)
     
     if resposta.status_code == 200:
         dados = resposta.json()

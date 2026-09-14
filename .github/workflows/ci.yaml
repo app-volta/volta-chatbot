@@ -1,0 +1,39 @@
+name: CI - Chatbot
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  validate-pr:
+    # v1 ainda aponta para a regex antiga; este commit aceita SCRUM com cinco letras.
+    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@7a05f44d91a20cfd124daae92e4a4a94f2d4b5db
+    secrets: inherit
+
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    needs: validate-pr
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install -r requirements.txt
+
+      - name: Verificar importação da aplicação
+        run: python -c "from app.main import app"
+
+      - name: Executar testes
+        run: python -m pytest -q

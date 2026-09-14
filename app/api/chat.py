@@ -17,6 +17,7 @@ from app.db.models import (
 
 # Nossas lógicas isoladas
 from app.core.guardrails import guardrail_entrada, guardrail_saida
+from app.core.auth import RequestIdentity, get_current_identity
 from app.db.storage import SessionRepository
 from app.core.observability import Observability
 
@@ -38,6 +39,7 @@ def _history_context(messages: list[dict]) -> list[dict[str, str]]:
 @router.post("", response_model=ChatResponse)
 async def chat(
     payload: ChatRequest,
+    identity: RequestIdentity = Depends(get_current_identity),
     sessions: SessionRepository = Depends(get_sessions),
     telemetry: Observability = Depends(get_telemetry),
     graph = Depends(get_graph)
@@ -51,7 +53,7 @@ async def chat(
     
     try:
         # 1. Validação de Sessão e Segurança
-        sessions.ensure_session_owner(payload.session_id, payload.tenant_id, payload.user_id)
+        sessions.ensure_session_owner(payload.session_id, identity.tenant_id, identity.user_id)
         
         outer_guardrail = guardrail_entrada(payload.message)
         
@@ -79,8 +81,8 @@ async def chat(
         graph_input = {
             "messages": [{"role": "user", "content": outer_guardrail.sanitized_text}],
             "request_id": str(request_id),
-            "user_id": payload.user_id,
-            "tenant_id": payload.tenant_id,
+            "user_id": identity.user_id,
+            "tenant_id": identity.tenant_id,
             "session_id": payload.session_id,
             "input_text": outer_guardrail.sanitized_text,
             "history": history,

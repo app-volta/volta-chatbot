@@ -16,7 +16,7 @@ class FakeTeam:
     def route(self, message):
         return RouteDecision(route=RouteName.TRIAGE, rationale="Teste")
 
-    def specialist(self, route, message, evidence, data=None, *, tenant_id, history=None):
+    def specialist(self, route, message, evidence, data=None, *, history=None):
         self.received_history = history
         return SpecialistResult(metrics_summary={"answer": "Resposta de teste"})
 

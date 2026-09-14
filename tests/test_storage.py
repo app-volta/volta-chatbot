@@ -1,5 +1,7 @@
 from uuid import UUID
 
+import pytest
+
 from app.db import storage
 from app.db.storage import PostgresRepository, _company_id_from_tenant
 
@@ -39,6 +41,9 @@ class FakeConnection:
 
     def cursor(self):
         return self._cursor
+
+    def transaction(self):
+        return self
 
 
 class FakePool:
@@ -95,6 +100,18 @@ def test_non_numeric_tenant_does_not_query_shared_schema():
     repository.pool = FakePool([])
 
     assert repository.consultar_metricas_esg(8, 2026, "jbs-demo") == []
+    assert repository.pool.cursor.sql == ""
+
+
+def test_company_data_queries_fail_closed_without_tenant():
+    repository = PostgresRepository()
+    repository.pool = FakePool([])
+
+    assert repository.get_incident_history_by_area(4) == []
+    assert repository.get_all_drafts() == []
+    assert repository.consultar_metricas_esg(8, 2026) == []
+    assert repository.consultar_performance_cooperativas() == []
+    assert repository.get_recent_incidents() == []
     assert repository.pool.cursor.sql == ""
 
 
@@ -163,6 +180,35 @@ def test_tenant_uuid_is_preserved_for_remote_schema():
 
     assert str(company_id) == tenant_id
     assert isinstance(company_id, UUID)
+
+
+def test_user_identity_is_resolved_by_authenticated_email():
+    repository = PostgresRepository()
+    user_id = UUID("550e8400-e29b-41d4-a716-446655440002")
+    tenant_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+    repository.pool = FakePool([{"user_id": user_id, "tenant_id": tenant_id}])
+
+    identity = repository.get_user_identity_by_email("funcionario@volta.com")
+
+    assert identity == {"user_id": user_id, "tenant_id": tenant_id}
+    assert "FROM users" in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == ("funcionario@volta.com",)
+
+
+def test_occurrence_draft_rejects_area_from_another_company():
+    repository = PostgresRepository()
+    repository.pool = FakePool([])
+
+    with pytest.raises(LookupError, match="Área não encontrada"):
+        repository.create_occurrence_draft(
+            company_id=UUID("550e8400-e29b-41d4-a716-446655440001"),
+            area_id=UUID("550e8400-e29b-41d4-a716-446655440002"),
+            user_id=UUID("550e8400-e29b-41d4-a716-446655440003"),
+            employee_description="Papelão no setor B",
+            priority="MEDIA",
+            ai_data={"report_text": "Laudo"},
+        )
+    assert "FROM area WHERE id = %s AND company_id = %s" in repository.pool.cursor.sql
 
 
 def test_mongodb_srv_connection_does_not_force_direct_connection(monkeypatch):

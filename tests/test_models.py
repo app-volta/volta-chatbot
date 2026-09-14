@@ -23,9 +23,7 @@ def test_analise_residuo_ia_deve_aceitar_mobile_summary():
 
 def test_occurrence_draft_uses_remote_uuid_identifiers():
     payload = OccurrenceDraftCreate(
-        company_id="550e8400-e29b-41d4-a716-446655440000",
         area_id="550e8400-e29b-41d4-a716-446655440001",
-        user_id="550e8400-e29b-41d4-a716-446655440002",
         ai_data={
             "detected_waste_type": "Plastico",
             "ai_contamination_level": "BAIXO",
@@ -35,7 +33,7 @@ def test_occurrence_draft_uses_remote_uuid_identifiers():
         },
     )
 
-    assert isinstance(payload.company_id, UUID)
+    assert isinstance(payload.area_id, UUID)
     assert payload.priority == "MEDIA"
 
 

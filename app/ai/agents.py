@@ -115,30 +115,6 @@ class AgentTeam:
             """Consulta contratos e regras operacionais de cooperativas indexados."""
             return serialize_citations(self.rag.retrieve("cooperatives", query))
 
-        @tool
-        def consultar_metricas_esg(month: int, year: int, tenant_id: str) -> str:
-            """Consulta agregados ESG de leitura no PostgreSQL. Mes deve estar entre 1 e 12."""
-            if not 1 <= month <= 12:
-                return json.dumps({"erro": "Mês inválido"})
-            if not tenant_id.strip():
-                return json.dumps({"erro": "tenant_id obrigatório"})
-            try:
-                rows = self.postgres.consultar_metricas_esg(month, year, tenant_id)
-            except Exception:
-                return json.dumps({"erro": "Métricas ESG indisponíveis para consulta no momento."}, ensure_ascii=False)
-            return json.dumps(rows, default=str, ensure_ascii=False)
-
-        @tool
-        def consultar_performance_cooperativas(tenant_id: str) -> str:
-            """Consulta indicadores de SLA e resposta de cooperativas no PostgreSQL."""
-            if not tenant_id.strip():
-                return json.dumps({"erro": "tenant_id obrigatório"})
-            try:
-                rows = self.postgres.consultar_performance_cooperativas(tenant_id)
-            except Exception:
-                return json.dumps({"erro": "Indicadores de cooperativas indisponíveis para consulta no momento."}, ensure_ascii=False)
-            return json.dumps(rows, default=str, ensure_ascii=False)
-
         # 1. Agentes Controladores -> Usam Structured Output puro
         prompt_router = ChatPromptTemplate.from_messages([("system", ROUTER_PROMPT.format(now=temporal_context())), ("user", "{input}")])
         self.router = prompt_router | self.router_model.with_structured_output(RouteDecision)
@@ -159,8 +135,10 @@ class AgentTeam:
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
         self.standards = _build_specialist(STANDARDS_PROMPT, [consultar_rag_operacional, consultar_rag_regulatorio])
-        self.data = _build_specialist(DATA_PROMPT, [consultar_metricas_esg])
-        self.performance = _build_specialist(PERFORMANCE_PROMPT, [consultar_rag_cooperativas, consultar_performance_cooperativas])
+        # Dados do banco já chegam filtrados pelo tenant autenticado no grafo.
+        # Não exponha consultas SQL a tools escolhidas pelo modelo.
+        self.data = _build_specialist(DATA_PROMPT, [])
+        self.performance = _build_specialist(PERFORMANCE_PROMPT, [consultar_rag_cooperativas])
 
     def _invoke_controller(self, name: str, runnable: Any, model: str, payload: str) -> Any:
         started = self.telemetry.timer()
@@ -209,14 +187,12 @@ class AgentTeam:
         evidence: list,
         data: list[dict] | None = None,
         *,
-        tenant_id: str,
         history: list[dict[str, str]] | None = None,
     ) -> SpecialistResult:
         selected = {"triage": self.triage, "standards": self.standards, "data": self.data, "performance": self.performance}[route]
         context = {
             "message": message,
             "conversation_history": history or [],
-            "tenant_id": tenant_id,
             "evidence": [item.model_dump(mode="json") for item in evidence],
             "database_data": data or [],
         }

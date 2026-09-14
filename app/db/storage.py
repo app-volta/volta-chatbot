@@ -48,7 +48,7 @@ class PostgresRepository:
     def get_incident_history_by_area(self, area_id: UUID | str, tenant_id: str | None = None) -> list[dict]:
         """Busca o historico de peso de lixo de uma cacamba especifica para treinar a IA."""
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -83,6 +83,15 @@ class PostgresRepository:
         except Exception:
             return False
 
+    def get_user_identity_by_email(self, email: str) -> dict | None:
+        """Resolve a identidade do JWT para os UUIDs atuais do usuário e da empresa."""
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT id AS user_id, company_id AS tenant_id FROM users WHERE email = %s LIMIT 1",
+                (email,),
+            )
+            return cursor.fetchone()
+
     def create_occurrence_draft(
         self,
         company_id: UUID | str,
@@ -100,6 +109,13 @@ class PostgresRepository:
         if not clean_priority:
             raise ValueError("priority e obrigatorio.")
         with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM area WHERE id = %s AND company_id = %s",
+                (area_id, company_id),
+            )
+            if not cursor.fetchone():
+                raise LookupError("Área não encontrada para esta empresa.")
+
             # 1. Cria o incidente com status pendente (Aguardando validação humana)
             cursor.execute(
                 """
@@ -162,7 +178,7 @@ class PostgresRepository:
     def get_all_drafts(self, tenant_id: str | None = None) -> list[dict]:
         """Busca os incidentes pendentes junto com o laudo da IA."""
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -181,7 +197,7 @@ class PostgresRepository:
         
     def consultar_metricas_esg(self, month: int, year: int, tenant_id: str | None = None) -> list[dict]:
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         period = f"{year:04d}-{month:02d}"
         with self.pool.connection() as connection, connection.cursor() as cursor:
@@ -213,7 +229,7 @@ class PostgresRepository:
 
     def consultar_performance_cooperativas(self, tenant_id: str | None = None) -> list[dict]:
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -238,7 +254,7 @@ class PostgresRepository:
         if limit < 1:
             return []
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(

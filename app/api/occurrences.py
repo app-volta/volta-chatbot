@@ -9,7 +9,6 @@ from langchain_core.messages import HumanMessage
 from app.db.models import (
     OccurrenceDraftCreate,
     OccurrenceDraftResponse,
-    ApprovalRequest,
     ApprovalResponse,
     AnaliseResiduoIA,
     AIManagementSummary,
@@ -21,6 +20,7 @@ from app.core.dependencies import get_postgres
 from app.core.dependencies import get_telemetry
 from app.core.config import get_settings
 from app.core.observability import Observability
+from app.core.auth import RequestIdentity, get_current_identity
 from app.core.guardrails import guardrail_entrada
 
 router = APIRouter()
@@ -29,6 +29,7 @@ MAX_IMAGE_BYTES = 10 * 1024 * 1024
 @router.post("/drafts", response_model=OccurrenceDraftResponse, status_code=status.HTTP_201_CREATED)
 def create_occurrence_draft(
     payload: OccurrenceDraftCreate,
+    identity: RequestIdentity = Depends(get_current_identity),
     repository: PostgresRepository = Depends(get_postgres)
 ) -> OccurrenceDraftResponse:
     """
@@ -37,35 +38,42 @@ def create_occurrence_draft(
     """
     # Converte o Pydantic ai_data em um dicionario para o repositorio
     ai_dict = payload.ai_data.model_dump()
+    try:
+        company_id = UUID(identity.tenant_id)
+        user_id = UUID(identity.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Identidade autenticada inválida para criar ocorrência.") from exc
     
-    draft_id = repository.create_occurrence_draft(
-        company_id=payload.company_id, 
-        area_id=payload.area_id, 
-        user_id=payload.user_id, 
-        employee_description=payload.employee_description,
-        priority=payload.priority,
-        ai_data=ai_dict
-    )
+    try:
+        draft_id = repository.create_occurrence_draft(
+            company_id=company_id,
+            area_id=payload.area_id,
+            user_id=user_id,
+            employee_description=payload.employee_description,
+            priority=payload.priority,
+            ai_data=ai_dict,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Área não encontrada para esta empresa.") from exc
     return OccurrenceDraftResponse(draft_id=draft_id, status="AGUARDANDO_VALIDACAO")
 
 
 @router.get("/drafts")
 def list_occurrence_drafts(
-    tenant_id: str = Query(..., min_length=1, max_length=128),
+    identity: RequestIdentity = Depends(get_current_identity),
     repository: PostgresRepository = Depends(get_postgres),
 ):
     """
     Retorna os ultimos rascunhos cadastrados no banco para o Front-end renderizar a tela de aprovacao.
     """
-    drafts = repository.get_all_drafts(tenant_id)
+    drafts = repository.get_all_drafts(identity.tenant_id)
     return {"total": len(drafts), "data": drafts}
 
 
 @router.post("/drafts/{draft_id}/approve", response_model=ApprovalResponse)
 def approve_occurrence_draft(
     draft_id: UUID,
-    payload: ApprovalRequest,
-    tenant_id: str = Query(..., min_length=1, max_length=128),
+    identity: RequestIdentity = Depends(get_current_identity),
     repository: PostgresRepository = Depends(get_postgres),
     telemetry: Observability = Depends(get_telemetry),
 ) -> ApprovalResponse:
@@ -76,7 +84,7 @@ def approve_occurrence_draft(
     gerado pela IA e oficializar o registro no PostgreSQL.
     """
     try:
-        occurrence_id = repository.approve_occurrence_draft(draft_id, tenant_id)
+        occurrence_id = repository.approve_occurrence_draft(draft_id, identity.tenant_id)
     except LookupError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
@@ -95,6 +103,7 @@ def approve_occurrence_draft(
 @router.post("/predict", response_model=AnaliseResiduoIA)
 async def predict_waste(
     file: UploadFile = File(...),
+    _identity: RequestIdentity = Depends(get_current_identity),
     telemetry: Observability = Depends(get_telemetry),
 ):
     """
@@ -173,7 +182,7 @@ async def predict_waste(
 @router.get("/areas/{area_id}/predict_capacity")
 def predict_area_capacity(
     area_id: UUID,
-    tenant_id: str = Query(..., min_length=1, max_length=128),
+    identity: RequestIdentity = Depends(get_current_identity),
     capacidade_maxima: float = Query(default=1000.0, gt=0),
     dias_futuros: int = Query(default=7, ge=0, le=365),
     repository: PostgresRepository = Depends(get_postgres)
@@ -181,7 +190,7 @@ def predict_area_capacity(
     """
     Busca o historico de lixo da area e preve quando a cacamba vai lotar.
     """
-    dados_historicos = repository.get_incident_history_by_area(area_id, tenant_id)
+    dados_historicos = repository.get_incident_history_by_area(area_id, identity.tenant_id)
     
     if not dados_historicos or len(dados_historicos) < 2:
         raise HTTPException(
@@ -199,12 +208,12 @@ def predict_area_capacity(
 
 @router.get("/reports/ai_summary", response_model=AIManagementSummary)
 def generate_ai_management_summary(
-    tenant_id: str = Query(..., min_length=1, max_length=128),
+    identity: RequestIdentity = Depends(get_current_identity),
     repository: PostgresRepository = Depends(get_postgres),
     telemetry: Observability = Depends(get_telemetry),
 ):
 
-    recent_data = repository.get_recent_incidents(limit=5, tenant_id=tenant_id)
+    recent_data = repository.get_recent_incidents(limit=5, tenant_id=identity.tenant_id)
 
     if not recent_data:
         return AIManagementSummary(

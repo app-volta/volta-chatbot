@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Query
 
+from app.core.auth import RequestIdentity, get_current_identity
 from app.core.dependencies import get_telemetry
 from app.core.observability import Observability
 
@@ -10,6 +11,7 @@ router = APIRouter()
 def summary(
     active_users: int = Query(default=100, ge=100, le=1000),
     requests_per_user: int = Query(default=5, ge=1, le=100),
+    _identity: RequestIdentity = Depends(get_current_identity),
     telemetry: Observability = Depends(get_telemetry),
 ) -> dict:
     """Retorna KPIs e projeção semanal para o painel operacional."""
