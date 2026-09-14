@@ -2,11 +2,13 @@ from datetime import UTC, datetime, timedelta
 
 import jwt
 import pytest
-from fastapi import HTTPException
-from pydantic import SecretStr
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
+from app.api.sessions import router as sessions_router
 from app.core.auth import get_current_identity
-from app.core.config import Settings
+from app.core.config import Settings, get_settings
+from app.core.dependencies import get_postgres, get_sessions
 from app.db.models import ChatRequest
 
 
@@ -26,7 +28,7 @@ class FakeIdentityRepository:
 
 
 def _settings(secret: str | None = JWT_KEY) -> Settings:
-    return Settings(_env_file=None, jwt_key=SecretStr(secret) if secret else None)
+    return Settings(_env_file=None, JWT_KEY=secret)
 
 
 def _token(secret: str = JWT_KEY, **claims) -> str:
@@ -106,3 +108,38 @@ def test_chat_payload_cannot_set_tenant_or_user_identity() -> None:
 
     assert "tenant_id" not in payload.model_dump()
     assert "user_id" not in payload.model_dump()
+
+
+def test_session_route_uses_identity_resolved_from_api_jwt() -> None:
+    tenant_id = "550e8400-e29b-41d4-a716-446655440001"
+    user_id = "550e8400-e29b-41d4-a716-446655440002"
+    repository = FakeIdentityRepository({"tenant_id": tenant_id, "user_id": user_id})
+
+    class FakeSessions:
+        identity = None
+
+        def create_session(self, tenant_id: str, user_id: str) -> dict:
+            self.identity = (tenant_id, user_id)
+            return {
+                "session_id": "session-1",
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "created_at": datetime.now(UTC),
+            }
+
+    sessions = FakeSessions()
+    app = FastAPI()
+    app.include_router(sessions_router, prefix="/v1/sessions")
+    app.dependency_overrides[get_settings] = lambda: _settings()
+    app.dependency_overrides[get_postgres] = lambda: repository
+    app.dependency_overrides[get_sessions] = lambda: sessions
+
+    with TestClient(app) as client:
+        assert client.post("/v1/sessions").status_code == 401
+        response = client.post(
+            "/v1/sessions?tenant_id=attacker&user_id=attacker",
+            headers={"Authorization": f"Bearer {_token()}"},
+        )
+
+    assert response.status_code == 201
+    assert sessions.identity == (tenant_id, user_id)

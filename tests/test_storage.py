@@ -103,6 +103,18 @@ def test_non_numeric_tenant_does_not_query_shared_schema():
     assert repository.pool.cursor.sql == ""
 
 
+def test_company_data_queries_fail_closed_without_tenant():
+    repository = PostgresRepository()
+    repository.pool = FakePool([])
+
+    assert repository.get_incident_history_by_area(4) == []
+    assert repository.get_all_drafts() == []
+    assert repository.consultar_metricas_esg(8, 2026) == []
+    assert repository.consultar_performance_cooperativas() == []
+    assert repository.get_recent_incidents() == []
+    assert repository.pool.cursor.sql == ""
+
+
 def test_incident_history_applies_company_scope():
     repository = PostgresRepository()
     repository.pool = FakePool(

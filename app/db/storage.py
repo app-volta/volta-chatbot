@@ -48,7 +48,7 @@ class PostgresRepository:
     def get_incident_history_by_area(self, area_id: UUID | str, tenant_id: str | None = None) -> list[dict]:
         """Busca o historico de peso de lixo de uma cacamba especifica para treinar a IA."""
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -178,7 +178,7 @@ class PostgresRepository:
     def get_all_drafts(self, tenant_id: str | None = None) -> list[dict]:
         """Busca os incidentes pendentes junto com o laudo da IA."""
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -197,7 +197,7 @@ class PostgresRepository:
         
     def consultar_metricas_esg(self, month: int, year: int, tenant_id: str | None = None) -> list[dict]:
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         period = f"{year:04d}-{month:02d}"
         with self.pool.connection() as connection, connection.cursor() as cursor:
@@ -229,7 +229,7 @@ class PostgresRepository:
 
     def consultar_performance_cooperativas(self, tenant_id: str | None = None) -> list[dict]:
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
@@ -254,7 +254,7 @@ class PostgresRepository:
         if limit < 1:
             return []
         company_id = _company_id_from_tenant(tenant_id)
-        if tenant_id is not None and company_id is None:
+        if company_id is None:
             return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
