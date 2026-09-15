@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
@@ -326,7 +327,8 @@ class SessionRepository:
             clean_uri = clean_uri[:-1]
 
         options = {"serverSelectionTimeoutMS": 5000, "appname": "volta-api"}
-        if not clean_uri.startswith("mongodb+srv://"):
+        authority = urlparse(clean_uri).netloc.rsplit("@", 1)[-1]
+        if not clean_uri.startswith("mongodb+srv://") and "," not in authority:
             options["directConnection"] = True
         self.client = MongoClient(clean_uri, **options)
         database = self.client.get_database()
