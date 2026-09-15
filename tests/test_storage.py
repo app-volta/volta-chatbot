@@ -228,3 +228,22 @@ def test_mongodb_srv_connection_does_not_force_direct_connection(monkeypatch):
 
     assert captured["uri"].startswith("mongodb+srv://")
     assert "directConnection" not in captured["options"]
+
+
+def test_mongodb_multi_host_connection_does_not_force_direct_connection(monkeypatch):
+    captured = {}
+
+    class FakeMongoClient:
+        def __init__(self, uri, **options):
+            captured["uri"] = uri
+            captured["options"] = options
+
+        def get_database(self):
+            return {"sessions": object(), "chat_messages": object(), "security_audit": object()}
+
+    monkeypatch.setattr(storage, "MongoClient", FakeMongoClient)
+
+    storage.SessionRepository().open("mongodb://user:password@mongo-a.example,mongo-b.example/volta")
+
+    assert "," in captured["uri"]
+    assert "directConnection" not in captured["options"]
