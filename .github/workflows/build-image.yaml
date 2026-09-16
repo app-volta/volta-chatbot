@@ -13,6 +13,10 @@ on:
         default: qa
         options: [qa, prod]
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build-on-push:
     if: github.event_name == 'push'
