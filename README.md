@@ -287,6 +287,30 @@ O cliente e os testes devem cobrir, no mínimo:
 - falha de PostgreSQL, MongoDB ou provedor de modelo;
 - resposta com ressalva de validação humana.
 
+## CI/CD e checklist de promoção
+
+O workflow `.github/workflows/build-image.yaml` permite gerar manualmente a
+imagem do chatbot no GitHub Actions. Selecione `qa` ou `prod` em **Run
+workflow**. A imagem é publicada no GHCR com a tag:
+
+~~~text
+ghcr.io/app-volta/chatbot:<ambiente>-<sha7>
+~~~
+
+Para promover a imagem, use o workflow `dispatch-deploy.yaml` do repositório
+`app-volta/volta-devops`, escolhendo o serviço `chatbot`, o mesmo ambiente e a
+tag exibida na execução do build. O deploy usa `SSH_HOST` (variável) e
+`SSH_PRIVATE_KEY` (segredo); nenhum valor desses deve ser commitado.
+
+Checklist antes de solicitar a promoção para `main`:
+
+- [ ] CI do pull request concluído com sucesso.
+- [ ] `pytest -q` executado localmente.
+- [ ] Build da imagem concluído e publicado no GHCR.
+- [ ] Deploy em `qa` concluído pelo workflow de DevOps.
+- [ ] Endpoint `/health` respondendo em `qa`.
+- [ ] Tag promovida registrada no PR e validada por um responsável.
+
 ## Limitações atuais
 
 - A qualidade do RAG depende da ingestão e atualização dos documentos oficiais.
