@@ -1,0 +1,22 @@
+name: Build chatbot image
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Ambiente da imagem
+        required: true
+        type: choice
+        default: qa
+        options: [qa, prod]
+
+jobs:
+  build:
+    uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@main
+    with:
+      image-name: chatbot
+      environment: ${{ inputs.environment }}
+      context: .
+      dockerfile: ./Dockerfile
+      push: true
+      notify-devops: false
