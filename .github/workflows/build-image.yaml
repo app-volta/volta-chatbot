@@ -14,11 +14,23 @@ on:
         options: [qa, prod]
 
 jobs:
-  build:
+  build-on-push:
+    if: github.event_name == 'push'
     uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@main
     with:
       image-name: chatbot
-      environment: ${{ inputs.environment || 'qa' }}
+      environment: qa
+      context: .
+      dockerfile: ./Dockerfile
+      push: true
+      notify-devops: false
+
+  build-manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@main
+    with:
+      image-name: chatbot
+      environment: ${{ inputs.environment }}
       context: .
       dockerfile: ./Dockerfile
       push: true
