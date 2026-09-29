@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
+from mcp.shared.memory import create_connected_server_and_client_session
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
@@ -25,9 +30,44 @@ from app.ai.prompts import (
     TRIAGE_PROMPT,
     temporal_context,
 )
-from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SessionSummary, SpecialistResult
+from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SessionSummary, SourceCitation, SpecialistResult
+from app.ai.mcp_server import mcp as norms_mcp_server
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+
+
+def _call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call() -> dict[str, Any]:
+        async with create_connected_server_and_client_session(norms_mcp_server) as session:
+            response = await session.call_tool(tool_name, arguments)
+        if response.isError:
+            raise RuntimeError("MCP retornou erro ao consultar o catálogo.")
+        text = next(block.text for block in response.content if hasattr(block, "text"))
+        return json.loads(text)
+
+    try:
+        return asyncio.run(call())
+    except Exception:
+        # A falha de fonte externa não deve derrubar a análise apoiada no RAG local.
+        return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+
+
+def _norm_citations(payload: dict[str, Any]) -> list[SourceCitation]:
+    # Só o registro detalhado entra em citações; resultados candidatos da busca não são evidência usada.
+    record = payload.get("norma")
+    if not isinstance(record, dict) or not record.get("ato_normativo") or not record.get("document_key"):
+        return []
+    excerpt = payload.get("texto_integral") or record.get("ementa", "")
+    return [SourceCitation(
+        source_id=f"mma-{record['document_key']}",
+        title=record["ato_normativo"],
+        corpus="regulatory",
+        location=record.get("assunto") or record.get("ano"),
+        url=record.get("url") or None,
+        excerpt=excerpt[:6000],
+        retrieved_at=datetime.now(UTC),
+    )]
+
 
 class AgentTeam:
     def __init__(self, settings: Settings, rag: FederatedRag, postgres: PostgresRepository, telemetry: Observability) -> None:
@@ -35,6 +75,9 @@ class AgentTeam:
         self.rag = rag
         self.postgres = postgres
         self.telemetry = telemetry
+        self._norm_citation_sink: ContextVar[list[SourceCitation] | None] = ContextVar(
+            f"norm_citations_{id(self)}", default=None
+        )
         self.router_model, self.router_model_name = self._router_model()
         self.specialist_model, self.specialist_model_name = self._specialist_model()
         self._create_agents()
@@ -100,6 +143,15 @@ class AgentTeam:
         return parser
 
     def _create_agents(self) -> None:
+        def call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> str:
+            payload = _call_norms_mcp(tool_name, arguments)
+            sink = self._norm_citation_sink.get()
+            if sink is not None:
+                for citation in _norm_citations(payload):
+                    if all(item.source_id != citation.source_id for item in sink):
+                        sink.append(citation)
+            return json.dumps(payload, ensure_ascii=False)
+
         @tool
         def consultar_rag_operacional(query: str) -> str:
             """Consulta manuais industriais e FISPQs indexados, com fonte e trecho."""
@@ -114,6 +166,19 @@ class AgentTeam:
         def consultar_rag_cooperativas(query: str) -> str:
             """Consulta contratos e regras operacionais de cooperativas indexados."""
             return serialize_citations(self.rag.retrieve("cooperatives", query))
+
+        @tool
+        def buscar_normas_residuos(termo: str, ano: int | None = None, assunto: str | None = None, limite: int = 5) -> str:
+            """Pesquisa legislação ambiental fora do RAG no catálogo oficial do MMA."""
+            return call_norms_mcp(
+                "buscar_normas_residuos",
+                {"termo": termo, "ano": ano, "assunto": assunto, "limite": limite},
+            )
+
+        @tool
+        def detalhar_norma(document_key: str) -> str:
+            """Detalha um resultado do catálogo externo; use o document_key retornado pela busca."""
+            return call_norms_mcp("detalhar_norma", {"document_key": document_key})
 
         # 1. Agentes Controladores -> Usam Structured Output puro
         prompt_router = ChatPromptTemplate.from_messages([("system", ROUTER_PROMPT.format(now=temporal_context())), ("user", "{input}")])
@@ -134,11 +199,23 @@ class AgentTeam:
             )
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
-        self.standards = _build_specialist(STANDARDS_PROMPT, [consultar_rag_operacional, consultar_rag_regulatorio])
+        self.standards = _build_specialist(
+            STANDARDS_PROMPT,
+            [consultar_rag_operacional, consultar_rag_regulatorio, buscar_normas_residuos, detalhar_norma],
+        )
         # Dados do banco já chegam filtrados pelo tenant autenticado no grafo.
         # Não exponha consultas SQL a tools escolhidas pelo modelo.
         self.data = _build_specialist(DATA_PROMPT, [])
         self.performance = _build_specialist(PERFORMANCE_PROMPT, [consultar_rag_cooperativas])
+
+    @contextmanager
+    def collect_norm_citations(self):
+        citations: list[SourceCitation] = []
+        token = self._norm_citation_sink.set(citations)
+        try:
+            yield citations
+        finally:
+            self._norm_citation_sink.reset(token)
 
     def _invoke_controller(self, name: str, runnable: Any, model: str, payload: str) -> Any:
         started = self.telemetry.timer()

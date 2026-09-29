@@ -5,6 +5,7 @@ pydantic>=2.9,<3.0
 pydantic-settings>=2.5,<3.0
 langchain>=1.0,<2.0
 langgraph>=1.0,<2.0
+mcp>=1.30,<2.0
 langgraph-checkpoint-mongodb>=0.2
 langchain-google-genai>=3.0
 langchain-groq>=1.0
