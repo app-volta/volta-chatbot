@@ -82,7 +82,9 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
 
     def standards(state: VoltaState) -> dict:
         evidence = rag.retrieve_for_route("standards", state["clean_input"], state.get("tenant_id"))
-        result = team.specialist("standards", state["clean_input"], evidence, history=state.get("history", []))
+        with team.collect_norm_citations() as external_evidence:
+            result = team.specialist("standards", state["clean_input"], evidence, history=state.get("history", []))
+        evidence = [*evidence, *external_evidence]
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def data(state: VoltaState) -> dict:

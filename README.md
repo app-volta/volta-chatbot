@@ -34,6 +34,8 @@ flowchart LR
     P --> SQL
     SQL --> PR[Modelo preditivo]
     N --> RAG[(FAISS federado)]
+    N --> MCP[MCP de normas externas]
+    MCP --> MMA[Catálogo público do MMA]
     T --> J[Agente juiz]
     N --> J
     D --> J
@@ -61,7 +63,7 @@ flowchart LR
 | --- | --- | --- |
 | Roteador | Classificar intenção e encaminhar a mensagem original | Llama via Groq |
 | Triagem | Interpretar relato ou imagem, sugerir categoria, risco e higienização | Gemini, inserir_nova_ocorrencia |
-| Normas | Responder dúvidas técnicas, FISPQs, manuais, legislação e ODS 12 | Gemini, RAG federado |
+| Normas | Responder dúvidas técnicas, FISPQs, manuais, legislação e ODS 12 | Gemini, RAG federado, MCP do catálogo do MMA |
 | Dados e BI | Converter perguntas em consultas de métricas e históricos | Gemini, PostgreSQL |
 | Performance | Avaliar SLA, tempo de resposta e engajamento logístico | Gemini, PostgreSQL |
 | Juiz | Revisar o resultado do especialista e detectar afirmações sem suporte | Gemini |
@@ -90,7 +92,7 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 3. Cooperativas: contratos, regras de coleta e níveis de serviço.
 4. Histórico: soluções e ocorrências já validadas.
 
-Cada resultado deve preservar fonte, trecho, identificador do documento e metadados de validade. O agente de normas deve responder apenas com base no contexto recuperado; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
+Cada resultado deve preservar fonte, trecho, identificador do documento e metadados de validade. O agente de Normas usa as fontes locais do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
 A indexação esperada usa embeddings e FAISS. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
 
@@ -113,6 +115,23 @@ python -m scripts.ingest_rag --corpus regulatory --url https://sdgs.un.org/goals
 ```
 
 Redirecionamentos para dominios fora da allowlist sao bloqueados. Apos a ingestao, o agente de Normas recupera o trecho, a URL e o identificador da fonte; quando nao houver evidencia suficiente, deve declarar a limitacao.
+
+### MCP de legislação ambiental
+
+O servidor MCP `app.ai.mcp_server` expõe duas ferramentas somente de leitura, consumidas pelo agente de Normas e disponíveis também por transporte stdio:
+
+- `buscar_normas_residuos`: pesquisa título, ementa, assunto e status no CSV consolidado do catálogo de Legislação Ambiental Brasileira do MMA; aceita filtros opcionais de ano, assunto e limite.
+- `detalhar_norma`: retorna o registro completo usando o `document_key` produzido pela busca.
+
+O catálogo é obtido pela API CKAN pública do MMA e mantido em cache em memória por 24 horas. Ao detalhar um ato, a ferramenta também tenta buscar e extrair o texto do documento no link oficial fornecido pelo catálogo; downloads são limitados a 15 MB e links são aceitos apenas em hosts `.gov.br`, sem seguir redirecionamentos. Quando o documento não pode ser obtido ou lido, a ferramenta mantém os metadados e a ementa, sem inventar o texto ausente. A citação usa o link direto do ato e um trecho do texto extraído quando disponível. O status reproduz o catálogo, mas não confirma, por si só, vigência nem aplicabilidade ao caso; o agente não emite parecer jurídico nem certificação técnica. O escopo é o catálogo de legislação ambiental do MMA, não uma busca irrestrita na web nem uma base geral de documentos ESG.
+
+Para iniciar o servidor MCP stdio manualmente, na raiz do repositório:
+
+~~~bash
+python -m app.ai.mcp_server
+~~~
+
+O agente da aplicação usa o mesmo servidor pelo cliente MCP oficial em memória; não é necessário subir um segundo serviço HTTP.
 
 ## Modelo preditivo
 
