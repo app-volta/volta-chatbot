@@ -42,12 +42,13 @@ def _token(secret: str = JWT_KEY, **claims) -> str:
 
 
 def test_identity_comes_from_signed_api_jwt_and_current_database_record() -> None:
-    repository = FakeIdentityRepository({"tenant_id": TENANT_ID, "user_id": USER_ID})
+    repository = FakeIdentityRepository({"tenant_id": TENANT_ID, "user_id": USER_ID, "role": " Gestor "})
 
-    identity = get_current_identity(f"Bearer {_token()}", _settings(), repository)
+    identity = get_current_identity(f"Bearer {_token(role='admin')}", _settings(), repository)
 
     assert identity.tenant_id == TENANT_ID
     assert identity.user_id == USER_ID
+    assert identity.role == " Gestor "
     assert repository.lookup_email == "funcionario@volta.com"
 
 

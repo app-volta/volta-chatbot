@@ -1,6 +1,7 @@
 import base64
 import json
 from uuid import UUID
+import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from app.ai.predictive import prever_volume_futuro
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -83,8 +84,11 @@ def approve_occurrence_draft(
     humano (tecnico da planta) deve chamar este endpoint para auditar o rascunho 
     gerado pela IA e oficializar o registro no PostgreSQL.
     """
+    if (identity.role or "").strip().casefold() != "gestor":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Apenas gestor pode aprovar rascunhos.")
+
     try:
-        occurrence_id = repository.approve_occurrence_draft(draft_id, identity.tenant_id)
+        occurrence_id = repository.approve_occurrence_draft(draft_id, identity.tenant_id, identity.user_id)
     except LookupError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
@@ -92,9 +96,11 @@ def approve_occurrence_draft(
         ) from exc
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, 
+            status_code=status.HTTP_409_CONFLICT,
             detail="Rascunho ja processado."
         ) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="O autor nao pode aprovar o proprio rascunho.") from exc
 
     telemetry.record_human_intervention("occurrence_approval")
     return ApprovalResponse(occurrence_id=occurrence_id, status="REGISTRADA")
@@ -155,7 +161,7 @@ async def predict_waste(
         )
 
         # 6. Manda bala e devolve pronto
-        resultado = structured_llm.invoke([mensagem])
+        resultado = await structured_llm.ainvoke([mensagem])
         telemetry.record_agent(
             "visual_triage",
             model_name,
@@ -207,13 +213,15 @@ def predict_area_capacity(
     return previsao
 
 @router.get("/reports/ai_summary", response_model=AIManagementSummary)
-def generate_ai_management_summary(
+async def generate_ai_management_summary(
     identity: RequestIdentity = Depends(get_current_identity),
     repository: PostgresRepository = Depends(get_postgres),
     telemetry: Observability = Depends(get_telemetry),
 ):
 
-    recent_data = repository.get_recent_incidents(limit=5, tenant_id=identity.tenant_id)
+    recent_data = await anyio.to_thread.run_sync(
+        lambda: repository.get_recent_incidents(limit=5, tenant_id=identity.tenant_id)
+    )
 
     if not recent_data:
         return AIManagementSummary(
@@ -248,7 +256,7 @@ def generate_ai_management_summary(
             api_key=settings.gemini_api_key.get_secret_value(),
         )
         structured_llm = llm.with_structured_output(AIManagementSummary)
-        result = structured_llm.invoke([HumanMessage(content=prompt)])
+        result = await structured_llm.ainvoke([HumanMessage(content=prompt)])
         telemetry.record_agent(
             "ai_management_summary",
             model_name,

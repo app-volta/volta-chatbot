@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ==============================================================================
 # ENUMS
@@ -45,6 +45,14 @@ class TriageAnalysis(BaseModel):
     unidades: str | None = Field(default=None, description="Ex: 11 un. (caixas/fardos)")
     confianca_ia: int = Field(description="Porcentagem de certeza da IA (0 a 100)")
     recomendacao_automatica: str = Field(description="Dica curta de armazenamento. Ex: Guarde num lugar seco.")
+    mobile_summary: str = Field(description="Resumo para leitura rápida no aplicativo, com no máximo 20 palavras.")
+
+    @field_validator("mobile_summary")
+    @classmethod
+    def limit_mobile_summary_words(cls, value: str) -> str:
+        if len(value.split()) > 20:
+            raise ValueError("mobile_summary deve ter no máximo 20 palavras.")
+        return value
 
 class SpecialistResult(BaseModel):
     proposed_occurrence: ProposedOccurrence | None = None
@@ -91,7 +99,6 @@ class AnaliseResiduoIA(BaseModel):
 class ChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     message: str = Field(min_length=1, max_length=6000)
-    image_base64: str | None = None
 
 class ChatResponse(BaseModel):
     request_id: UUID

@@ -1,15 +1,85 @@
 import asyncio
+import io
+from contextlib import asynccontextmanager
 
 import pytest
 
 from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.client.session import ClientSession
+
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from app.ai import norms_catalog
 from app.ai.agents import _call_norms_mcp, _norm_citations
 from app.ai.mcp_server import mcp
 
 
+def test_norms_mcp_network_failure_is_logged_and_degrades_to_rag(monkeypatch, caplog):
+    @asynccontextmanager
+    async def unavailable(_server):
+        raise OSError("catalogue connection refused")
+        yield
+
+    monkeypatch.setattr(
+        "app.ai.agents.create_connected_server_and_client_session",
+        unavailable,
+    )
+
+    with caplog.at_level("ERROR", logger="app.ai.agents"):
+        result = _call_norms_mcp("buscar_normas_residuos", {"termo": "CONAMA 275"})
+
+    assert "indisponível" in result["error"]
+    assert "RAG" in result["error"]
+    assert "Norms MCP call failed" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "CONAMA 275" not in caplog.text
+
+
+def test_norms_mcp_recovers_from_transport_exception_group(monkeypatch):
+    @asynccontextmanager
+    async def unavailable(_server):
+        raise ExceptionGroup("transport", [OSError("catalogue unavailable")])
+        yield
+
+    monkeypatch.setattr("app.ai.agents.create_connected_server_and_client_session", unavailable)
+
+    result = _call_norms_mcp("buscar_normas_residuos", {"termo": "CONAMA 275"})
+
+    assert "temporariamente" in result["error"]
+    assert "RAG" in result["error"]
+
+
+def test_norms_mcp_rejects_non_object_json_payload(monkeypatch):
+    class Session:
+        async def call_tool(self, *_args, **_kwargs):
+            class Response:
+                isError = False
+                content = [type("TextBlock", (), {"text": "[]"})()]
+
+            return Response()
+
+    @asynccontextmanager
+    async def connected(_server):
+        yield Session()
+
+    monkeypatch.setattr("app.ai.agents.create_connected_server_and_client_session", connected)
+
+    result = _call_norms_mcp("buscar_normas_residuos", {"termo": "CONAMA 275"})
+
+    assert "temporariamente" in result["error"]
+    assert "RAG" in result["error"]
+
+
 def test_norms_mcp_tools_search_and_detail(monkeypatch):
+    calls = []
+    original_call_tool = ClientSession.call_tool
+
+    async def traced_call_tool(self, name, arguments=None, *args, **kwargs):
+        calls.append((name, arguments))
+        return await original_call_tool(self, name, arguments, *args, **kwargs)
+
+    monkeypatch.setattr(ClientSession, "call_tool", traced_call_tool)
     rows = [{
         "ANO": "2024",
         "DOCUMENTO": "RESOLUÇÃO",
@@ -42,6 +112,8 @@ def test_norms_mcp_tools_search_and_detail(monkeypatch):
 
     detail = _call_norms_mcp("detalhar_norma", {"document_key": result["results"][0]["document_key"]})
     assert detail["norma"]["ato_normativo"] == "Resolução MMA nº 12, de 2024"
+    assert [name for name, _ in calls] == ["buscar_normas_residuos", "detalhar_norma"]
+    assert calls[1][1]["document_key"] == result["results"][0]["document_key"]
     citations = _norm_citations(detail)
     assert len(citations) == 1
     assert citations[0].url == "https://www.gov.br/mma/legislacao/12"
@@ -113,9 +185,20 @@ def test_detail_fetches_official_pdf_and_cites_its_text(monkeypatch):
     }]
     monkeypatch.setattr(norms_catalog, "_load_catalog", lambda: (rows, "2026-09-23"))
 
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=612, height=792)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})})
+    stream = DecodedStreamObject()
+    stream.set_data(b"BT /F1 12 Tf 72 720 Td (AZUL papel e papelao; VERMELHO plastico.) Tj ET")
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    pdf = io.BytesIO()
+    writer.write(pdf)
+    pdf_bytes = pdf.getvalue()
+
     class Response:
         url = "https://conama.mma.gov.br/?option=com_sisconama&task=arquivo.download&id=273"
-        headers = {"content-type": "application/pdf", "content-length": "9"}
+        headers = {"content-type": "application/pdf", "content-length": str(len(pdf_bytes))}
 
         def __enter__(self):
             return self
@@ -127,7 +210,7 @@ def test_detail_fetches_official_pdf_and_cites_its_text(monkeypatch):
             pass
 
         def iter_bytes(self):
-            yield b"%PDF-test"
+            yield pdf_bytes
 
     class Client:
         def __init__(self, **kwargs):
@@ -144,26 +227,30 @@ def test_detail_fetches_official_pdf_and_cites_its_text(monkeypatch):
             assert url.startswith("https://conama.mma.gov.br/")
             return Response()
 
-    class Page:
-        def extract_text(self):
-            return "AZUL: papel e papelão. VERMELHO: plástico."
-
-    class Reader:
-        def __init__(self, stream):
-            assert stream.read().startswith(b"%PDF-")
-            self.pages = [Page()]
-
     monkeypatch.setattr(norms_catalog.httpx, "Client", Client)
-    monkeypatch.setattr(norms_catalog, "PdfReader", Reader)
-    record = norms_catalog._record(rows[0])
-    detail = norms_catalog.detail_norm(record["document_key"])
+    calls = []
+    original_call_tool = ClientSession.call_tool
 
+    async def traced_call_tool(self, name, arguments=None, *args, **kwargs):
+        calls.append((name, arguments))
+        return await original_call_tool(self, name, arguments, *args, **kwargs)
+
+    monkeypatch.setattr(ClientSession, "call_tool", traced_call_tool)
+    result = _call_norms_mcp(
+        "buscar_normas_residuos",
+        {"termo": "CONAMA 275", "ano": 2001, "assunto": None, "limite": 5},
+    )
+    document_key = result["results"][0]["document_key"]
+    detail = _call_norms_mcp("detalhar_norma", {"document_key": document_key})
+
+    assert [name for name, _ in calls] == ["buscar_normas_residuos", "detalhar_norma"]
+    assert calls[1][1]["document_key"] == document_key
     assert detail["norma"]["url"].startswith("https://conama.mma.gov.br/")
     assert detail["texto_integral_disponivel"] is True
-    assert "AZUL: papel e papelão" in detail["texto_integral"]
+    assert "AZUL papel e papelao" in detail["texto_integral"]
     citation = _norm_citations(detail)[0]
     assert citation.url == detail["norma"]["url"]
-    assert "VERMELHO: plástico" in citation.excerpt
+    assert "VERMELHO plastico" in citation.excerpt
 
 
 def test_source_url_only_upgrades_allowlisted_gov_http():

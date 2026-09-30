@@ -35,7 +35,7 @@ class FakeStructuredModel:
     def __init__(self):
         self.prompt = None
 
-    def invoke(self, messages):
+    async def ainvoke(self, messages):
         self.prompt = messages[0].content
         return AIManagementSummary(
             problema_analisado="Há registros recentes de descarte.",
@@ -61,14 +61,15 @@ def test_ai_summary_calls_structured_model_with_scoped_sanitized_data(monkeypatc
     monkeypatch.setattr(occurrences, "get_settings", lambda: settings)
     monkeypatch.setattr(occurrences, "ChatGoogleGenerativeAI", FakeModel)
 
-    result = occurrences.generate_ai_management_summary(
+    import asyncio
+    result = asyncio.run(occurrences.generate_ai_management_summary(
         RequestIdentity(
             tenant_id="550e8400-e29b-41d4-a716-446655440000",
             user_id="550e8400-e29b-41d4-a716-446655440002",
         ),
         repository,
         telemetry,
-    )
+    ))
 
     assert result.problema_analisado == "Há registros recentes de descarte."
     assert repository.tenant_id == "550e8400-e29b-41d4-a716-446655440000"

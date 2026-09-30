@@ -1,4 +1,6 @@
 from contextlib import asynccontextmanager
+import logging
+import uuid
 from fastapi import FastAPI, status, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +14,15 @@ from app.ai.agents import AgentTeam
 from app.ai.graph import build_volta_graph
 from app.db.storage import db_postgres, db_mongo
 from app.api import sessions, observability
+from app.core.request_context import RequestIdFilter, request_id_context
+
+
+_handler = logging.StreamHandler()
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
+_formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s")
+for _configured_handler in logging.getLogger().handlers:
+    _configured_handler.setFormatter(_formatter)
+    _configured_handler.addFilter(RequestIdFilter())
 
 
 @asynccontextmanager
@@ -51,6 +62,18 @@ app = FastAPI(
     description="SaaS B2B para gestão operacional e rastreabilidade de resíduos (ODS 12)",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def attach_request_id(request, call_next):
+    request_id = str(uuid.uuid4())
+    token = request_id_context.set(request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        request_id_context.reset(token)
 
 # CORS Middleware
 app.add_middleware(

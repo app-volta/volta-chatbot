@@ -14,6 +14,7 @@ from app.db.storage import PostgresRepository
 class RequestIdentity:
     tenant_id: str
     user_id: str
+    role: str | None = None
 
 
 def get_current_identity(
@@ -75,4 +76,5 @@ def get_current_identity(
             headers={"WWW-Authenticate": "Bearer"},
         ) from exc
 
-    return RequestIdentity(tenant_id=tenant_id, user_id=user_id)
+    role = identity.get("role")
+    return RequestIdentity(tenant_id=tenant_id, user_id=user_id, role=role if isinstance(role, str) else None)

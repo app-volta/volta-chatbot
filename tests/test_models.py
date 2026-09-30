@@ -1,9 +1,11 @@
 from uuid import UUID
 from typing import get_type_hints
 
+import pytest
+
 from app.api.occurrences import approve_occurrence_draft
 from app.api.chat import _history_context
-from app.db.models import AnaliseResiduoIA, OccurrenceDraftCreate
+from app.db.models import AnaliseResiduoIA, OccurrenceDraftCreate, TriageAnalysis
 
 def test_analise_residuo_ia_deve_aceitar_mobile_summary():
     dados = {
@@ -19,6 +21,19 @@ def test_analise_residuo_ia_deve_aceitar_mobile_summary():
     
     assert modelo.mobile_summary == "Lixo reciclável detectado, descarte na lixeira vermelha."
     assert modelo.ai_contamination_level == "BAIXO"
+
+
+def test_triage_analysis_rejects_mobile_summary_over_20_words():
+    summary = " ".join(["residuo"] * 21)
+    with pytest.raises(ValueError, match="20 palavras"):
+        TriageAnalysis(
+            tipo_material="Plástico",
+            contaminacao="Baixa",
+            quantidade_estimada="10 kg",
+            confianca_ia=90,
+            recomendacao_automatica="Armazenar em local seco.",
+            mobile_summary=summary,
+        )
 
 
 def test_occurrence_draft_uses_remote_uuid_identifiers():
