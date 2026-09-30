@@ -11,6 +11,7 @@ class FakeCursor:
         self.rows = rows
         self.sql = ""
         self.params = None
+        self.executions = []
 
     def __enter__(self):
         return self
@@ -21,6 +22,7 @@ class FakeCursor:
     def execute(self, sql, params):
         self.sql = sql
         self.params = params
+        self.executions.append((sql, params))
 
     def fetchall(self):
         return self.rows
@@ -53,6 +55,29 @@ class FakePool:
 
     def connection(self):
         return self.connection_obj
+
+
+class ApprovalCursor(FakeCursor):
+    def __init__(self, results):
+        super().__init__([])
+        self.results = iter(results)
+        self.current_result = None
+
+    def execute(self, sql, params):
+        super().execute(sql, params)
+        self.current_result = next(self.results)
+
+    def fetchone(self):
+        return self.current_result
+
+
+def _approval_repository(results, *, manager=True):
+    repository = PostgresRepository()
+    repository.pool = FakePool([])
+    cursor = ApprovalCursor(([{"manager": 1}] if manager else [None]) + results)
+    repository.pool.cursor = cursor
+    repository.pool.connection_obj = FakeConnection(cursor)
+    return repository
 
 
 def test_metric_query_uses_remote_esg_schema_and_company_scope():
@@ -163,14 +188,65 @@ def test_draft_and_recent_queries_reject_invalid_tenant_before_database_call():
 
 
 def test_draft_approval_applies_company_scope():
-    repository = PostgresRepository()
     draft_id = UUID("550e8400-e29b-41d4-a716-446655440001")
     tenant_id = "550e8400-e29b-41d4-a716-446655440000"
-    repository.pool = FakePool([{"id": draft_id}])
+    approver_id = UUID("550e8400-e29b-41d4-a716-446655440002")
+    repository = _approval_repository([{"id": draft_id}])
 
-    assert repository.approve_occurrence_draft(draft_id, tenant_id) == draft_id
-    assert "company_id = %s" in repository.pool.cursor.sql
-    assert repository.pool.cursor.params == (draft_id, UUID(tenant_id))
+    assert repository.approve_occurrence_draft(draft_id, tenant_id, approver_id) == draft_id
+    manager_sql, manager_params = repository.pool.cursor.executions[0]
+    update_sql, update_params = repository.pool.cursor.executions[1]
+    assert "JOIN role r" in manager_sql
+    assert "FOR SHARE OF u, r" in manager_sql
+    assert manager_params == (approver_id, UUID(tenant_id))
+    assert "company_id = %s" in update_sql
+    assert "status = 'AGUARDANDO_VALIDACAO'" in update_sql
+    assert "user_id <> %s" in update_sql
+    assert update_params == (draft_id, UUID(tenant_id), approver_id)
+
+
+def test_approval_of_already_processed_draft_is_conflict():
+    draft_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    approver_id = "550e8400-e29b-41d4-a716-446655440002"
+    repository = _approval_repository([
+        None,
+        {"user_id": UUID("550e8400-e29b-41d4-a716-446655440003"), "status": "REGISTRADA"},
+    ])
+
+    with pytest.raises(ValueError, match="já processado"):
+        repository.approve_occurrence_draft(draft_id, tenant_id, approver_id)
+
+
+def test_approval_blocks_author_and_hides_other_tenant_draft():
+    draft_id = UUID("550e8400-e29b-41d4-a716-446655440001")
+    tenant_id = "550e8400-e29b-41d4-a716-446655440000"
+    approver_id = "550e8400-e29b-41d4-a716-446655440002"
+
+    author_repository = _approval_repository([
+        None,
+        {"user_id": UUID(approver_id), "status": "AGUARDANDO_VALIDACAO"},
+    ])
+    with pytest.raises(PermissionError, match="autor"):
+        author_repository.approve_occurrence_draft(draft_id, tenant_id, approver_id)
+
+    other_tenant_repository = _approval_repository([None, None])
+    with pytest.raises(LookupError, match="não encontrado"):
+        other_tenant_repository.approve_occurrence_draft(draft_id, tenant_id, approver_id)
+    assert "company_id = %s" in other_tenant_repository.pool.cursor.sql
+
+
+def test_approval_rechecks_current_manager_role_inside_transaction():
+    repository = _approval_repository([], manager=False)
+
+    with pytest.raises(PermissionError, match="gestor"):
+        repository.approve_occurrence_draft(
+            UUID("550e8400-e29b-41d4-a716-446655440001"),
+            "550e8400-e29b-41d4-a716-446655440000",
+            "550e8400-e29b-41d4-a716-446655440002",
+        )
+
+    assert len(repository.pool.cursor.executions) == 1
 
 
 def test_tenant_uuid_is_preserved_for_remote_schema():
@@ -186,12 +262,11 @@ def test_user_identity_is_resolved_by_authenticated_email():
     repository = PostgresRepository()
     user_id = UUID("550e8400-e29b-41d4-a716-446655440002")
     tenant_id = UUID("550e8400-e29b-41d4-a716-446655440001")
-    repository.pool = FakePool([{"user_id": user_id, "tenant_id": tenant_id}])
-
+    repository.pool = FakePool([{"user_id": user_id, "tenant_id": tenant_id, "role": "gestor"}])
     identity = repository.get_user_identity_by_email("funcionario@volta.com")
 
-    assert identity == {"user_id": user_id, "tenant_id": tenant_id}
-    assert "FROM users" in repository.pool.cursor.sql
+    assert identity == {"user_id": user_id, "tenant_id": tenant_id, "role": "gestor"}
+    assert "JOIN role r" in repository.pool.cursor.sql
     assert repository.pool.cursor.params == ("funcionario@volta.com",)
 
 

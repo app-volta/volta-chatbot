@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -11,10 +12,13 @@ from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.shared.exceptions import McpError
+import httpx
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
 
+from app.core.request_context import log_exception_without_details
 from app.core.config import Settings
 from app.ai.multi_rag import FederatedRag, serialize_citations
 from app.core.observability import Observability
@@ -34,6 +38,20 @@ from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SessionS
 from app.ai.mcp_server import mcp as norms_mcp_server
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+logger = logging.getLogger(__name__)
+
+
+class _NormsToolError(RuntimeError):
+    pass
+
+
+_NORMS_RECOVERABLE_ERRORS = (httpx.HTTPError, OSError, TimeoutError, McpError, json.JSONDecodeError, _NormsToolError)
+
+
+def _is_recoverable_norms_error(exc: BaseException) -> bool:
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_is_recoverable_norms_error(item) for item in exc.exceptions)
+    return isinstance(exc, _NORMS_RECOVERABLE_ERRORS)
 
 
 def _call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -41,14 +59,24 @@ def _call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]
         async with create_connected_server_and_client_session(norms_mcp_server) as session:
             response = await session.call_tool(tool_name, arguments)
         if response.isError:
-            raise RuntimeError("MCP retornou erro ao consultar o catálogo.")
-        text = next(block.text for block in response.content if hasattr(block, "text"))
-        return json.loads(text)
+            raise _NormsToolError("MCP retornou erro ao consultar o catálogo.")
+        text = next((block.text for block in response.content if hasattr(block, "text")), None)
+        if text is None:
+            raise _NormsToolError("MCP retornou resposta sem conteúdo textual.")
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise _NormsToolError("MCP retornou formato de dados inválido.")
+        return payload
 
     try:
         return asyncio.run(call())
-    except Exception:
-        # A falha de fonte externa não deve derrubar a análise apoiada no RAG local.
+    except ExceptionGroup as exc:
+        if not _is_recoverable_norms_error(exc):
+            raise
+        log_exception_without_details(logger, "Norms MCP call failed; continuing with available RAG evidence", exc)
+        return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+    except _NORMS_RECOVERABLE_ERRORS as exc:
+        log_exception_without_details(logger, "Norms MCP call failed; continuing with available RAG evidence", exc)
         return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
 
 
@@ -193,9 +221,9 @@ class AgentTeam:
         # 2. Especialistas com Tools -> Construídos nativamente com o LangGraph
         def _build_specialist(prompt_text, tools):
             return create_react_agent(
-                self.specialist_model, 
-                tools=tools, 
-                prompt=prompt_text
+                self.specialist_model,
+                tools=tools,
+                prompt=prompt_text,
             )
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
@@ -232,24 +260,23 @@ class AgentTeam:
         try:
             result = executor.invoke({"messages": [("user", payload)]})
             final_message = result["messages"][-1]
-            
-            if hasattr(final_message, "parsed") and final_message.parsed:
-                parsed = final_message.parsed
-            else:
-                structured_parser = self._structured_specialist(SpecialistResult)
-                parsed = structured_parser.invoke(
-                    "Converta a resposta abaixo para o schema SpecialistResult. "
-                    "Preencha metrics_summary com answer (texto completo), confidence "
-                    "(número de 0 a 1) e requires_human_validation=true; use null nos "
-                    f"demais campos quando não se aplicarem. Resposta: {final_message.content}"
+            content = final_message.content
+            if isinstance(content, list):
+                content = "".join(
+                    block.get("text", "") for block in content if isinstance(block, dict)
                 )
-            
+            try:
+                parsed = SpecialistResult.model_validate_json(content)
+            except (ValueError, TypeError):
+                parsed = self._structured_specialist(SpecialistResult).invoke(
+                    "Converta a resposta abaixo para SpecialistResult. Preserve apenas informações fornecidas; "
+                    "se campos não se aplicarem, use null. Resposta: " + str(content)
+                )
+
             self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
             return parsed
         except Exception as exc:
-            print(f"\n[ERRO FATAL NO AGENTE {name}]")
-            print(exc) 
-            print("[/ERRO FATAL]\n")
+            log_exception_without_details(logger, f"Specialist {name} failed", exc)
 
             self.telemetry.record_agent(name, model, started, payload, str(exc), failed=True)
             raise RuntimeError(f"Falha controlada no especialista {name}.") from exc

@@ -3,6 +3,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.ai.graph import build_volta_graph
 from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, RouteName, SourceCitation, SpecialistResult
+from app.ai.prompts import ORCHESTRATOR_PROMPT
 
 
 class FakeRag:
@@ -99,3 +100,7 @@ def test_graph_passes_rejected_verdict_to_orchestrator():
 
     assert result["judge"].approved is False
     assert team.received_verdict.approved is False
+    assert team.received_verdict.reason == "Rascunho contém status sem fonte."
+    assert "judge.reason" in ORCHESTRATOR_PROMPT
+    assert "requires_human_validation=true" in ORCHESTRATOR_PROMPT
+    assert "números, normas ou afirmações contestados" in ORCHESTRATOR_PROMPT

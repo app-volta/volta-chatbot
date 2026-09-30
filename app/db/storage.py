@@ -88,7 +88,8 @@ class PostgresRepository:
         """Resolve a identidade do JWT para os UUIDs atuais do usuário e da empresa."""
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
-                "SELECT id AS user_id, company_id AS tenant_id FROM users WHERE email = %s LIMIT 1",
+                "SELECT u.id AS user_id, u.company_id AS tenant_id, r.type AS role "
+                "FROM users u JOIN role r ON r.id = u.role_id WHERE u.email = %s LIMIT 1",
                 (email,),
             )
             return cursor.fetchone()
@@ -161,20 +162,45 @@ class PostgresRepository:
             )
             return incident_id
 
-    def approve_occurrence_draft(self, draft_id: UUID | str, tenant_id: str) -> UUID | str:
-        """Oficializa o registro mudando o status para REGISTRADA."""
+    def approve_occurrence_draft(self, draft_id: UUID | str, tenant_id: str, approver_id: str) -> UUID | str:
+        """Atomically approves a pending draft without author self-approval."""
         company_id = _company_id_from_tenant(tenant_id)
-        if company_id is None:
+        try:
+            approver_uuid = UUID(str(approver_id))
+        except (TypeError, ValueError):
+            approver_uuid = None
+        if company_id is None or approver_uuid is None:
             raise LookupError("Rascunho não encontrado.")
-        with self.pool.connection() as connection, connection.cursor() as cursor:
+        with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s AND company_id = %s RETURNING id",
-                (draft_id, company_id),
+                "SELECT 1 FROM users u JOIN role r ON r.id = u.role_id "
+                "WHERE u.id = %s AND u.company_id = %s AND LOWER(TRIM(r.type)) = 'gestor' "
+                "FOR SHARE OF u, r",
+                (approver_uuid, company_id),
+            )
+            if not cursor.fetchone():
+                raise PermissionError("Apenas gestor atual da empresa pode aprovar rascunhos.")
+
+            cursor.execute(
+                "UPDATE incident SET status = 'REGISTRADA' "
+                "WHERE id = %s AND company_id = %s AND status = 'AGUARDANDO_VALIDACAO' "
+                "AND user_id <> %s RETURNING id",
+                (draft_id, company_id, approver_uuid),
             )
             updated = cursor.fetchone()
-            if not updated:
+            if updated:
+                return updated["id"]
+
+            cursor.execute(
+                "SELECT user_id, status FROM incident WHERE id = %s AND company_id = %s",
+                (draft_id, company_id),
+            )
+            current = cursor.fetchone()
+            if current is None:
                 raise LookupError("Rascunho não encontrado.")
-            return updated["id"]
+            if UUID(str(current["user_id"])) == approver_uuid:
+                raise PermissionError("O autor não pode aprovar o próprio rascunho.")
+            raise ValueError("Rascunho já processado.")
         
     def get_all_drafts(self, tenant_id: str | None = None) -> list[dict]:
         """Busca os incidentes pendentes junto com o laudo da IA."""

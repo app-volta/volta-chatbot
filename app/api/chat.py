@@ -1,3 +1,4 @@
+import logging
 from time import perf_counter
 from uuid import uuid4
 import anyio
@@ -23,8 +24,10 @@ from app.core.observability import Observability
 
 # Função fictícia para ilustrar a injeção do Grafo (você pode colocar isso no storage.py ou num dependencies.py)
 from app.core.dependencies import get_sessions, get_telemetry, get_graph
+from app.core.request_context import log_exception_without_details, request_id_context
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _history_context(messages: list[dict]) -> list[dict[str, str]]:
@@ -34,6 +37,27 @@ def _history_context(messages: list[dict]) -> list[dict[str, str]]:
         for message in messages
         if message.get("role") in {"user", "assistant"} and isinstance(message.get("content"), str)
     ][-8:]
+
+
+def _enforce_judge_verdict(answer, citations, specialist, judge):
+    if judge is None or judge.approved:
+        return answer, citations, specialist, judge
+
+    return (
+        CorporateAnswer(
+            title="Validação humana necessária",
+            answer=(
+                "O avaliador não aprovou a análise. As evidências disponíveis não sustentam com segurança "
+                "uma ou mais conclusões; por isso, não exibirei valores, normas ou recomendações não validados. "
+                "Solicite revisão humana ou forneça evidências verificáveis."
+            ),
+            recommended_actions=["Solicite validação humana das evidências."],
+            requires_human_validation=True,
+        ),
+        [],
+        None,
+        JudgeVerdict(approved=False, reason="As evidências não sustentaram a análise; validação humana necessária."),
+    )
 
 
 @router.post("", response_model=ChatResponse)
@@ -49,7 +73,7 @@ async def chat(
     Inclui guardrails, auditoria e execução isolada de thread para não bloquear o servidor.
     """
     started = perf_counter()
-    request_id = uuid4()
+    request_id = uuid4() if request_id_context.get() == "-" else request_id_context.get()
     
     try:
         # 1. Validação de Sessão e Segurança
@@ -105,6 +129,8 @@ async def chat(
         judge = None
         if result.get("judge"):
             judge = JudgeVerdict.model_validate(result["judge"])
+
+        answer, citations, specialist, judge = _enforce_judge_verdict(answer, citations, specialist, judge)
         
         # 7. Finalização, persistência e resposta
         sessions.append_message(payload.session_id, "assistant", answer.answer, str(request_id))
@@ -119,6 +145,7 @@ async def chat(
             response=answer,
             citations=citations,
             proposed_occurrence=specialist.proposed_occurrence if specialist else None,
+            triage_analysis=specialist.triage_analysis if specialist else None,
             judge=judge,
         )
         
@@ -127,7 +154,6 @@ async def chat(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sessão não autorizada.") from exc
         
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        log_exception_without_details(logger, "Chat request failed", exc)
         telemetry.record_request("unknown", started, "error")
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Não foi possível concluir a análise operacional.") from exc
