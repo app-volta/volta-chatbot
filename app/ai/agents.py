@@ -39,6 +39,7 @@ from app.ai.mcp_server import mcp as norms_mcp_server
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 logger = logging.getLogger(__name__)
+SPECIALIST_RECURSION_LIMIT = 12
 
 
 class _NormsToolError(RuntimeError):
@@ -258,7 +259,10 @@ class AgentTeam:
     def _invoke_specialist(self, name: str, executor: Any, model: str, payload: str) -> SpecialistResult:
         started = self.telemetry.timer()
         try:
-            result = executor.invoke({"messages": [("user", payload)]})
+            result = executor.invoke(
+                {"messages": [("user", payload)]},
+                config={"recursion_limit": SPECIALIST_RECURSION_LIMIT},
+            )
             final_message = result["messages"][-1]
             content = final_message.content
             if isinstance(content, list):

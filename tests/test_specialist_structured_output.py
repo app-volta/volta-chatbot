@@ -17,8 +17,10 @@ class FakeTelemetry:
 class FakeExecutor:
     def __init__(self, content):
         self.content = content
+        self.config = None
 
-    def invoke(self, _input):
+    def invoke(self, _input, *, config=None):
+        self.config = config
         return {"messages": [AIMessage(content=self.content)]}
 
 
@@ -54,9 +56,10 @@ def test_structured_specialist_response_skips_conversion_fallback(monkeypatch):
         raising=False,
     )
 
+    executor = FakeExecutor(json.dumps(payload, ensure_ascii=False))
     result = team._invoke_specialist(
         "triage",
-        FakeExecutor(json.dumps(payload, ensure_ascii=False)),
+        executor,
         "fake:model",
         "payload",
     )
@@ -65,6 +68,7 @@ def test_structured_specialist_response_skips_conversion_fallback(monkeypatch):
     assert result.proposed_occurrence.category == "Papelão"
     assert result.triage_analysis.confianca_ia == 90
     assert result.triage_analysis.mobile_summary == "Papelão estimado para armazenamento seco."
+    assert executor.config["recursion_limit"] == 12
 
 
 def test_invalid_specialist_json_uses_structured_output_fallback(monkeypatch):

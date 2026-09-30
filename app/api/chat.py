@@ -25,9 +25,15 @@ from app.core.observability import Observability
 # Função fictícia para ilustrar a injeção do Grafo (você pode colocar isso no storage.py ou num dependencies.py)
 from app.core.dependencies import get_sessions, get_telemetry, get_graph
 from app.core.request_context import log_exception_without_details, request_id_context
+from app.core.config import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+CHAT_GRAPH_RECURSION_LIMIT = 25
+
+
+async def _mongo_call(function, *args):
+    return await anyio.to_thread.run_sync(function, *args, abandon_on_cancel=True)
 
 
 def _history_context(messages: list[dict]) -> list[dict[str, str]]:
@@ -68,22 +74,48 @@ async def chat(
     telemetry: Observability = Depends(get_telemetry),
     graph = Depends(get_graph)
 ) -> ChatResponse:
+    started = perf_counter()
+    timeout_scope = None
+    try:
+        with anyio.fail_after(get_settings().chat_timeout_seconds) as timeout_scope:
+            return await _process_chat(payload, identity, sessions, telemetry, graph, started)
+    except TimeoutError as exc:
+        if timeout_scope is None or not timeout_scope.cancelled_caught:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Não foi possível concluir a análise operacional.",
+            ) from exc
+        logger.warning("Chat request exceeded configured time limit")
+        telemetry.record_request("timeout", started, "timeout")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="A análise excedeu o tempo limite. Tente novamente.",
+        ) from exc
+
+
+async def _process_chat(
+    payload: ChatRequest,
+    identity: RequestIdentity,
+    sessions: SessionRepository,
+    telemetry: Observability,
+    graph,
+    started: float,
+) -> ChatResponse:
     """
     Processa a requisição do usuário passando pela arquitetura Multiagente.
-    Inclui guardrails, auditoria e execução isolada de thread para não bloquear o servidor.
+    Inclui guardrails, auditoria e chamadas de I/O sem bloquear o servidor.
     """
-    started = perf_counter()
     request_id = uuid4() if request_id_context.get() == "-" else request_id_context.get()
     
     try:
         # 1. Validação de Sessão e Segurança
-        sessions.ensure_session_owner(payload.session_id, identity.tenant_id, identity.user_id)
+        await _mongo_call(sessions.ensure_session_owner, payload.session_id, identity.tenant_id, identity.user_id)
         
         outer_guardrail = guardrail_entrada(payload.message)
         
         # 2. Bloqueio imediato se ferir as diretrizes
         if outer_guardrail.blocked:
-            sessions.audit_security_event(payload.session_id, outer_guardrail.reason or "input_blocked")
+            await _mongo_call(sessions.audit_security_event, payload.session_id, outer_guardrail.reason or "input_blocked")
             answer = CorporateAnswer(
                 title="Solicitação bloqueada",
                 answer=guardrail_saida(outer_guardrail.reason or "Solicitação bloqueada pelas diretrizes de segurança."),
@@ -98,8 +130,8 @@ async def chat(
             )
 
         # 3. Histórico Seguro: recupera o contexto anterior e persiste só o texto higienizado.
-        history = _history_context(sessions.recent_history(payload.session_id))
-        sessions.append_message(payload.session_id, "user", outer_guardrail.sanitized_text, str(request_id))
+        history = _history_context(await _mongo_call(sessions.recent_history, payload.session_id))
+        await _mongo_call(sessions.append_message, payload.session_id, "user", outer_guardrail.sanitized_text, str(request_id))
         
         # 4. Estado inicial do Grafo (LangGraph)
         graph_input = {
@@ -112,10 +144,10 @@ async def chat(
             "history": history,
         }
         
-        config = {"configurable": {"thread_id": payload.session_id}}
+        config = {"configurable": {"thread_id": payload.session_id}, "recursion_limit": CHAT_GRAPH_RECURSION_LIMIT}
         
         # 5. Execução do Multiagente (O professor alerta: NÃO bloquear o event loop aqui!)
-        result = await anyio.to_thread.run_sync(lambda: graph.invoke(graph_input, config=config))
+        result = await graph.ainvoke(graph_input, config=config)
         
         # 6. Parse Estruturado (Type Hints e Pydantic em ação)
         answer = CorporateAnswer.model_validate(result["corporate_answer"])
@@ -133,7 +165,7 @@ async def chat(
         answer, citations, specialist, judge = _enforce_judge_verdict(answer, citations, specialist, judge)
         
         # 7. Finalização, persistência e resposta
-        sessions.append_message(payload.session_id, "assistant", answer.answer, str(request_id))
+        await _mongo_call(sessions.append_message, payload.session_id, "assistant", answer.answer, str(request_id))
         if judge is not None:
             telemetry.record_judge(judge.approved, human_intervention=not judge.approved)
         telemetry.record_request(route.value, started, "success", resolved=not judge or judge.approved)
@@ -149,6 +181,9 @@ async def chat(
             judge=judge,
         )
         
+    except TimeoutError:
+        raise
+
     except PermissionError as exc:
         telemetry.record_request("authorization", started, "forbidden")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sessão não autorizada.") from exc

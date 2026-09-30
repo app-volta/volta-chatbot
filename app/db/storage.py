@@ -352,7 +352,7 @@ class SessionRepository:
         if clean_uri.endswith("?"):
             clean_uri = clean_uri[:-1]
 
-        options = {"serverSelectionTimeoutMS": 5000, "appname": "volta-api"}
+        options = {"serverSelectionTimeoutMS": 5000, "socketTimeoutMS": 5000, "appname": "volta-api"}
         authority = urlparse(clean_uri).netloc.rsplit("@", 1)[-1]
         if not clean_uri.startswith("mongodb+srv://") and "," not in authority:
             options["directConnection"] = True
