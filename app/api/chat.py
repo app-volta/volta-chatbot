@@ -25,7 +25,6 @@ from app.core.observability import Observability
 # Função fictícia para ilustrar a injeção do Grafo (você pode colocar isso no storage.py ou num dependencies.py)
 from app.core.dependencies import get_sessions, get_telemetry, get_graph
 from app.core.request_context import log_exception_without_details, request_id_context
-from app.core.config import get_settings
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -33,7 +32,7 @@ CHAT_GRAPH_RECURSION_LIMIT = 25
 
 
 async def _mongo_call(function, *args):
-    return await anyio.to_thread.run_sync(function, *args, abandon_on_cancel=True)
+    return await anyio.to_thread.run_sync(function, *args, abandon_on_cancel=False)
 
 
 def _history_context(messages: list[dict]) -> list[dict[str, str]]:
@@ -75,22 +74,7 @@ async def chat(
     graph = Depends(get_graph)
 ) -> ChatResponse:
     started = perf_counter()
-    timeout_scope = None
-    try:
-        with anyio.fail_after(get_settings().chat_timeout_seconds) as timeout_scope:
-            return await _process_chat(payload, identity, sessions, telemetry, graph, started)
-    except TimeoutError as exc:
-        if timeout_scope is None or not timeout_scope.cancelled_caught:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Não foi possível concluir a análise operacional.",
-            ) from exc
-        logger.warning("Chat request exceeded configured time limit")
-        telemetry.record_request("timeout", started, "timeout")
-        raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="A análise excedeu o tempo limite. Tente novamente.",
-        ) from exc
+    return await _process_chat(payload, identity, sessions, telemetry, graph, started)
 
 
 async def _process_chat(
@@ -147,7 +131,10 @@ async def _process_chat(
         config = {"configurable": {"thread_id": payload.session_id}, "recursion_limit": CHAT_GRAPH_RECURSION_LIMIT}
         
         # 5. Execução do Multiagente (O professor alerta: NÃO bloquear o event loop aqui!)
-        result = await graph.ainvoke(graph_input, config=config)
+        result = await anyio.to_thread.run_sync(
+            lambda: graph.invoke(graph_input, config=config),
+            abandon_on_cancel=False,
+        )
         
         # 6. Parse Estruturado (Type Hints e Pydantic em ação)
         answer = CorporateAnswer.model_validate(result["corporate_answer"])
@@ -181,9 +168,6 @@ async def _process_chat(
             judge=judge,
         )
         
-    except TimeoutError:
-        raise
-
     except PermissionError as exc:
         telemetry.record_request("authorization", started, "forbidden")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sessão não autorizada.") from exc

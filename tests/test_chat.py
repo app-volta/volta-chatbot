@@ -1,11 +1,12 @@
 import asyncio
 import time
-from types import SimpleNamespace
 
+import anyio
 from fastapi import FastAPI
+from langgraph.errors import GraphRecursionError
 from httpx import ASGITransport, AsyncClient
 
-from app.api.chat import _enforce_judge_verdict
+from app.api.chat import _enforce_judge_verdict, _mongo_call
 from app.api.chat import router as chat_router
 from app.core.auth import RequestIdentity, get_current_identity
 from app.core.dependencies import get_graph, get_sessions, get_telemetry
@@ -79,14 +80,17 @@ class FakeChatTelemetry:
 
 
 class FakeChatGraph:
-    def __init__(self, delay=0):
+    def __init__(self, delay=0, error=None):
         self.delay = delay
+        self.error = error
         self.config = None
 
-    async def ainvoke(self, _input, *, config):
+    def invoke(self, _input, *, config):
         self.config = config
+        if self.error:
+            raise self.error
         if self.delay:
-            await asyncio.sleep(self.delay)
+            time.sleep(self.delay)
         return {
             "corporate_answer": {"answer": "Resposta direta."},
             "route": "direct",
@@ -109,7 +113,7 @@ def _chat_test_app(sessions, graph, telemetry):
 def test_chat_offloads_sync_mongo_calls_and_limits_graph_steps():
     async def run():
         sessions = FakeSessions(delay=0.04)
-        graph = FakeChatGraph()
+        graph = FakeChatGraph(delay=0.04)
         telemetry = FakeChatTelemetry()
         app = _chat_test_app(sessions, graph, telemetry)
         stop_heartbeat = asyncio.Event()
@@ -134,14 +138,47 @@ def test_chat_offloads_sync_mongo_calls_and_limits_graph_steps():
     asyncio.run(run())
 
 
-def test_chat_global_deadline_returns_504(monkeypatch):
+def test_cancelled_mongo_call_finishes_before_cancellation_propagates():
+    async def run():
+        completed = False
+
+        def slow_write():
+            nonlocal completed
+            time.sleep(0.04)
+            completed = True
+
+        started = time.perf_counter()
+        with anyio.move_on_after(0.005) as scope:
+            await _mongo_call(slow_write)
+
+        assert scope.cancel_called
+        assert completed
+        assert time.perf_counter() - started >= 0.04
+
+    asyncio.run(run())
+
+
+def test_chat_graph_recursion_limit_is_reported_as_service_error():
     async def run():
         telemetry = FakeChatTelemetry()
-        app = _chat_test_app(FakeSessions(), FakeChatGraph(delay=1), telemetry)
-        monkeypatch.setattr("app.api.chat.get_settings", lambda: SimpleNamespace(chat_timeout_seconds=0.05))
+        graph = FakeChatGraph(error=GraphRecursionError("recursion limit reached"))
+        app = _chat_test_app(FakeSessions(), graph, telemetry)
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/v1/chat", json={"session_id": "s-1", "message": "oi"})
-        assert response.status_code == 504
-        assert telemetry.requests[-1][0][2] == "timeout"
+        assert response.status_code == 503
+        assert graph.config["recursion_limit"] == 25
+        assert telemetry.requests[-1][0][2] == "error"
+
+    asyncio.run(run())
+
+
+def test_chat_provider_timeout_is_reported_and_counted_as_error():
+    async def run():
+        telemetry = FakeChatTelemetry()
+        app = _chat_test_app(FakeSessions(), FakeChatGraph(error=TimeoutError()), telemetry)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/v1/chat", json={"session_id": "s-1", "message": "oi"})
+        assert response.status_code == 503
+        assert telemetry.requests[-1][0][2] == "error"
 
     asyncio.run(run())

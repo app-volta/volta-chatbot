@@ -34,7 +34,6 @@ class Settings(BaseSettings):
     qdrant_api_key: SecretStr | None = None
     qdrant_collection_prefix: str = "volta"
     source_download_timeout_seconds: int = 20
-    chat_timeout_seconds: int = Field(default=180, ge=1, le=300)
     allowed_source_hosts: set[str] = {"sdgs.un.org", "www.gov.br", "jbsesg.com", "ambientaljbs.com.br"}
 
     cooperative_a2a_base_url: HttpUrl | None = None
