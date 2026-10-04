@@ -63,7 +63,7 @@ flowchart LR
 | --- | --- | --- |
 | Roteador | Classificar intenção e encaminhar a mensagem original | Llama via Groq |
 | Triagem | Interpretar relato ou imagem, sugerir categoria, risco e higienização | Gemini, inserir_nova_ocorrencia |
-| Normas | Responder dúvidas técnicas, FISPQs, manuais, legislação e ODS 12 | Gemini, RAG federado, MCP do catálogo do MMA |
+| Normas e documentação | Responder dúvidas explicativas sobre resíduos, funcionamento do VOLTA, FISPQs, manuais, legislação e ODS 12 | Gemini, RAG federado, MCP do catálogo do MMA |
 | Dados e BI | Converter perguntas em consultas de métricas e históricos | Gemini, PostgreSQL |
 | Performance | Avaliar SLA, tempo de resposta e engajamento logístico | Gemini, PostgreSQL |
 | Juiz | Revisar o resultado do especialista e detectar afirmações sem suporte | Gemini |
@@ -92,7 +92,7 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 3. Cooperativas: contratos, regras de coleta e níveis de serviço.
 4. Histórico: soluções e ocorrências já validadas.
 
-Cada resultado deve preservar fonte, trecho, identificador do documento e metadados de validade. O agente de Normas usa as fontes locais do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
+Cada resultado deve preservar fonte, trecho, identificador do documento e metadados de validade. Perguntas explicativas sobre documentação e funcionamento do VOLTA usam a rota `standards`; relatos de ocorrências concretas usam `triage`. O agente de Normas e Documentação usa as evidências do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
 A indexação usa embeddings e, com `QDRANT_URL` configurado, Qdrant para os quatro corpora. As coleções são `<QDRANT_COLLECTION_PREFIX>_operational`, `_regulatory`, `_cooperatives` e `_history` (prefixo padrão: `volta`). Sem essa URL, usa FAISS local. O histórico é filtrado por empresa; os demais corpora são referências compartilhadas. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
 
