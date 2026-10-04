@@ -32,7 +32,8 @@ class ConstantEmbeddings(Embeddings):
         return [1.0, 1.0]
 
 
-def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp_path):
+@pytest.mark.parametrize("corpus", ["operational", "regulatory", "cooperatives", "history"])
+def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp_path, corpus):
     settings = Settings(
         _env_file=None,
         rag_base_path=str(tmp_path / "faiss"),
@@ -42,20 +43,21 @@ def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp
     rag = FederatedRag(settings, embeddings=ConstantEmbeddings())
 
     indexed = rag.ingest_documents(
-        "history",
+        corpus,
         [Document(page_content="Procedimento de segregação do papelão.", metadata={"title": "manual", "tenant_id": "tenant-a"})],
     )
-    citations = rag.retrieve("history", "segregação do papelão", tenant_id="tenant-a")
+    citations = rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-a")
 
     assert indexed == 1
     assert citations
     assert citations[0].title == "manual"
-    assert rag._qdrant.collection_exists("test-volta_history")
+    assert rag._qdrant.collection_exists(f"test-volta_{corpus}")
 
-    assert rag.retrieve("history", "segregação do papelão", tenant_id="tenant-b") == []
+    if corpus == "history":
+        assert rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-b") == []
 
 
-def test_qdrant_memory_preserves_faiss_sources_and_reaches_triage(tmp_path):
+def test_qdrant_corpora_reach_triage_without_cross_tenant_history(tmp_path):
     settings = Settings(
         _env_file=None,
         rag_base_path=str(tmp_path / "faiss"),
@@ -77,7 +79,34 @@ def test_qdrant_memory_preserves_faiss_sources_and_reaches_triage(tmp_path):
 
     assert {citation.title for citation in tenant_a} == {"histórico", "manual"}
     assert [citation.title for citation in tenant_b] == ["manual"]
-    assert not rag._qdrant.collection_exists("test-volta_operational")
+    assert rag._qdrant.collection_exists("test-volta_operational")
+
+
+def test_migration_preserves_faiss_and_is_idempotent_without_reembedding(tmp_path):
+    class ExistingVectorsOnly(ConstantEmbeddings):
+        def embed_documents(self, texts):
+            raise AssertionError("A migração deve reutilizar os vetores existentes.")
+
+    settings = Settings(_env_file=None, rag_base_path=str(tmp_path / "faiss"), qdrant_url=None)
+    documents = [Document(page_content="VOLTA é uma plataforma B2B.", metadata={"title": "volta", "page": 3})]
+    local = FederatedRag(settings, embeddings=ConstantEmbeddings())
+    local.ingest_documents("operational", documents)
+    original_index = (tmp_path / "faiss" / "operational" / "index.faiss").read_bytes()
+    remote = FederatedRag(settings.model_copy(update={"qdrant_url": ":memory:"}), embeddings=ExistingVectorsOnly())
+
+    assert remote.migrate_faiss_to_qdrant("operational") == 1
+    assert remote.migrate_faiss_to_qdrant("operational") == 1
+    assert remote._qdrant.count("volta_operational", exact=True).count == 1
+    citations = remote.retrieve("operational", "VOLTA")
+    assert citations[0].title == "volta"
+    assert citations[0].location == "3"
+    assert (tmp_path / "faiss" / "operational" / "index.faiss").read_bytes() == original_index
+
+    # O manifesto local deve não impedir uma ingestão no novo backend.
+    fresh = FederatedRag(settings.model_copy(update={"qdrant_url": ":memory:"}), embeddings=ConstantEmbeddings())
+    assert fresh.ingest_documents("operational", documents) == 1
+    assert fresh.ingest_documents("operational", documents) == 1
+    assert fresh._qdrant.count("volta_operational", exact=True).count == 1
 
 
 def test_ingest_directory_persists_and_deduplicates_chunks(tmp_path):

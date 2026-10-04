@@ -1,4 +1,4 @@
-"""RAG federado com índices FAISS segregados por domínio."""
+"""RAG federado com coleções Qdrant ou índices FAISS segregados por domínio."""
 
 from __future__ import annotations
 
@@ -164,7 +164,9 @@ class FederatedRag:
             return 0
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
         chunks = splitter.split_documents(documents)
-        known_ids = self._load_manifest(corpus)
+        # Qdrant faz upsert com IDs determinísticos, inclusive entre réplicas.
+        # Um manifesto FAISS local não comprova que o ponto existe no Qdrant.
+        known_ids = self._load_manifest(corpus) if self._qdrant is None else set()
         new_chunks = []
         for chunk in chunks:
             source_id = str(chunk.metadata.get("source_id", chunk.metadata.get("source", "")))
@@ -184,9 +186,8 @@ class FederatedRag:
             known_ids.add(chunk_id)
         if not new_chunks:
             return 0
-        if self._qdrant is not None and corpus == "history":
+        if self._qdrant is not None:
             self._ingest_qdrant(corpus, new_chunks)
-            self._save_manifest(corpus, known_ids)
             return len(new_chunks)
         current = self._load(corpus)
         if current:
@@ -199,10 +200,32 @@ class FederatedRag:
         self._save_manifest(corpus, known_ids)
         return len(new_chunks)
 
-    def _ingest_qdrant(self, corpus: Corpus, chunks: list[Document]) -> None:
-        vectors = self.embeddings.embed_documents([chunk.page_content for chunk in chunks])
+    def migrate_faiss_to_qdrant(self, corpus: Corpus) -> int:
+        """Copia um índice local para Qdrant sem apagar o backup nem regerar embeddings."""
+        if corpus not in CORPORA:
+            raise ValueError("Corpus RAG inválido.")
+        if self._qdrant is None:
+            raise ValueError("Configure QDRANT_URL antes de migrar o índice.")
+        store = self._load(corpus)
+        if store is None:
+            return 0
+        chunks = [
+            store.docstore.search(doc_id)
+            for _, doc_id in sorted(store.index_to_docstore_id.items())
+        ]
+        vectors = [store.index.reconstruct(i).tolist() for i in range(store.index.ntotal)]
+        self._ingest_qdrant(corpus, chunks, vectors=vectors)
+        return len(chunks)
+
+    def _ingest_qdrant(
+        self, corpus: Corpus, chunks: list[Document], *, vectors: list[list[float]] | None = None
+    ) -> None:
+        if vectors is None:
+            vectors = self.embeddings.embed_documents([chunk.page_content for chunk in chunks])
         if not vectors or not vectors[0]:
             raise RuntimeError("O modelo de embedding não retornou vetores válidos.")
+        if len(vectors) != len(chunks):
+            raise RuntimeError("A quantidade de vetores não corresponde aos documentos.")
         vector_size = len(vectors[0])
         if any(len(vector) != vector_size for vector in vectors):
             raise RuntimeError("O modelo de embedding retornou dimensões inconsistentes.")
@@ -224,7 +247,7 @@ class FederatedRag:
         self._qdrant.upsert(collection_name=collection_name, points=points, wait=True)
 
     def ingest_directory(self, corpus: Corpus, directory: str | Path) -> int:
-        """Carrega TXT, Markdown e PDF de um diretório e indexa o corpus."""
+        """Carrega TXT, Markdown e PDF e indexa no backend configurado."""
         root = Path(directory)
         if not root.is_dir():
             raise ValueError(f"Diretório de documentos não encontrado: {root}")
@@ -260,7 +283,7 @@ class FederatedRag:
     def retrieve(self, corpus: Corpus, query: str, k: int = 4, tenant_id: str | None = None) -> list[SourceCitation]:
         if not query.strip():
             return []
-        if self._qdrant is not None and corpus == "history":
+        if self._qdrant is not None:
             return self._retrieve_qdrant(corpus, query, k, tenant_id)
         store = self._load(corpus)
         if not store:
