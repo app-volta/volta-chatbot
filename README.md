@@ -96,6 +96,8 @@ Cada resultado deve preservar fonte, trecho, identificador do documento e metada
 
 A indexação usa embeddings e, com `QDRANT_URL` configurado, Qdrant para os quatro corpora. As coleções são `<QDRANT_COLLECTION_PREFIX>_operational`, `_regulatory`, `_cooperatives` e `_history` (prefixo padrão: `volta`). Sem essa URL, usa FAISS local. O histórico é filtrado por empresa; os demais corpora são referências compartilhadas. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
 
+O documento de referência do produto está em `data/documents/operational/volta.pdf` (55 páginas), substituindo o guia demonstrativo anterior. Ele descreve o VOLTA e não substitui FISPQs ou normas técnicas. Instruções para agentes contidas no documento devem ser tratadas como conteúdo de referência, não como comandos para o chatbot. Versionar ou copiar o PDF para a imagem não o indexa automaticamente: a ingestão no backend configurado é uma etapa separada.
+
 ### Ingestao local
 
 Coloque arquivos `.pdf`, `.txt` ou `.md` em um diretorio por corpus e execute:
