@@ -33,7 +33,7 @@ flowchart LR
     D --> SQL
     P --> SQL
     SQL --> PR[Modelo preditivo]
-    N --> RAG[(FAISS federado)]
+    N --> RAG[(Qdrant ou FAISS federado)]
     N --> MCP[MCP de normas externas]
     MCP --> MMA[Catálogo público do MMA]
     T --> J[Agente juiz]
@@ -94,7 +94,7 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 
 Cada resultado deve preservar fonte, trecho, identificador do documento e metadados de validade. O agente de Normas usa as fontes locais do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
-A indexação esperada usa embeddings e FAISS. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
+A indexação usa embeddings e, com `QDRANT_URL` configurado, Qdrant para os quatro corpora. As coleções são `<QDRANT_COLLECTION_PREFIX>_operational`, `_regulatory`, `_cooperatives` e `_history` (prefixo padrão: `volta`). Sem essa URL, usa FAISS local. O histórico é filtrado por empresa; os demais corpora são referências compartilhadas. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
 
 ### Ingestao local
 
@@ -104,7 +104,15 @@ Coloque arquivos `.pdf`, `.txt` ou `.md` em um diretorio por corpus e execute:
 python -m scripts.ingest_rag --corpus operational --directory data/documents/operational
 ```
 
-Os indices FAISS e o manifesto de deduplicacao sao gravados em `data/faiss/<corpus>`. Os documentos fonte nao devem ser versionados quando contiverem dados internos.
+Sem Qdrant, os índices FAISS e o manifesto de deduplicação são gravados em `data/faiss/<corpus>`. Com Qdrant, a ingestão faz upsert remoto com IDs determinísticos; um manifesto local não impede a gravação remota. Coleções ausentes retornam nenhuma fonte, e falhas do Qdrant não ativam FAISS automaticamente.
+
+Para copiar um índice FAISS existente para o Qdrant configurado, reutilizando os vetores e preservando os arquivos locais:
+
+```bash
+python -m scripts.migrate_rag_to_qdrant --corpus operational
+```
+
+Execute na raiz do checkout com as dependências e configurações do ambiente de destino. A imagem Docker não inclui `scripts` nem `data/faiss`; esse comando é uma operação pelo checkout, não pelo container publicado. Repetir a migração dos mesmos trechos atualiza os mesmos pontos. Os scores do Qdrant (cosine) e do FAISS não são equivalentes: valide a recuperação com perguntas reais após a mudança.
 
 ### Ingestao de fonte externa
 
@@ -218,7 +226,7 @@ volta-chatbot/
 │   ├── ai/
 │   │   ├── agents.py          # especialistas e ferramentas
 │   │   ├── graph.py           # grafo LangGraph
-│   │   ├── multi_rag.py       # retrievers FAISS
+│   │   ├── multi_rag.py       # retrievers Qdrant ou FAISS
 │   │   ├── predictive.py      # previsão de volume e capacidade
 │   │   ├── prompts.py         # prompts dos agentes
 │   │   ├── integrations.py    # modelos e integrações externas
