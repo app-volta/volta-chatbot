@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   validate-pr:
-    # v1 ainda aponta para a regex antiga; este commit aceita SCRUM com cinco letras.
-    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@7a05f44d91a20cfd124daae92e4a4a94f2d4b5db
+    # SHA do DevOps que permite promover develop para main.
+    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@61413ee2cf023b74653753c090859a67b3e04b45
     secrets: inherit
 
   build:
