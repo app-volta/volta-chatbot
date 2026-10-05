@@ -98,6 +98,12 @@ def _norm_citations(payload: dict[str, Any]) -> list[SourceCitation]:
     )]
 
 
+def _evidence_payload(citation: SourceCitation) -> dict[str, Any]:
+    if citation.internal_document:
+        return {"corpus": citation.corpus, "excerpt": citation.excerpt}
+    return citation.model_dump(mode="json")
+
+
 class AgentTeam:
     def __init__(self, settings: Settings, rag: FederatedRag, postgres: PostgresRepository, telemetry: Observability) -> None:
         self.settings = settings
@@ -183,7 +189,7 @@ class AgentTeam:
 
         @tool
         def consultar_rag_operacional(query: str) -> str:
-            """Consulta manuais industriais e FISPQs indexados, com fonte e trecho."""
+            """Consulta conteúdo de manuais industriais e FISPQs sem expor metadados internos."""
             return serialize_citations(self.rag.retrieve("operational", query))
 
         @tool
@@ -301,7 +307,7 @@ class AgentTeam:
         context = {
             "message": message,
             "conversation_history": history or [],
-            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "evidence": [_evidence_payload(item) for item in evidence],
             "database_data": data or [],
         }
         return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
@@ -309,7 +315,7 @@ class AgentTeam:
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:
         context = {
             "specialist_result": specialist.model_dump(mode="json"),
-            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "evidence": [_evidence_payload(item) for item in evidence],
             "database_data": data or [],
         }
         return self._invoke_controller("judge", self.judge, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))

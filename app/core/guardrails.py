@@ -82,8 +82,8 @@ def guardrail_entrada(text: str) -> GuardrailResult:
     return GuardrailResult(blocked=False, allowed=True, sanitized_text=clean, pii_tokens=mapping)
 
 
-def guardrail_saida(text: str) -> str:
-    """Remove PII residual e torna explícita a limitação de responsabilidade técnica."""
+def guardrail_saida(text: str, *, requires_human_validation: bool = False) -> str:
+    """Remove PII residual e acrescenta homologação somente quando necessária."""
     output = text.strip()
     output = _mask(CPF_RE, output, "CPF_REDACTED", {}, lambda value: _valid_document(value, 11))
     output = _mask(CNPJ_RE, output, "CNPJ_REDACTED", {}, lambda value: _valid_document(value, 14))
@@ -91,6 +91,10 @@ def guardrail_saida(text: str) -> str:
     output = _mask(PHONE_RE, output, "TELEFONE_REDACTED", {})
     output = ABSOLUTE_CLAIMS.sub("não é possível afirmar com certeza", output)
     disclaimer = "Validação obrigatória: a decisão operacional deve ser homologada pelo responsável técnico da planta."
-    if disclaimer not in output:
+    validation_already_mentioned = any(
+        phrase in output.casefold()
+        for phrase in ("responsável técnico", "homologação", "revisão humana", "validação humana", "aprovação humana")
+    )
+    if requires_human_validation and not validation_already_mentioned:
         output = f"{output}\n\n{disclaimer}"
     return output

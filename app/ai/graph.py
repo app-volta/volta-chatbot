@@ -128,15 +128,34 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             title="Solicitação bloqueada",
             answer=state.get("direct_reply", "A solicitação não pode ser processada pelas diretrizes de segurança do VOLTA."),
             recommended_actions=["Reformule a solicitação dentro do escopo de gestão operacional de resíduos."],
-            requires_human_validation=True,
+            requires_human_validation=False,
         )
         return {"corporate_answer": answer}
 
     def output_guardrail(state: VoltaState) -> dict:
         answer = state["corporate_answer"]
+        route = state.get("route")
+        judge = state.get("judge")
+        requires_human_validation = (
+            route == RouteName.TRIAGE.value
+            or (
+                route not in {RouteName.DIRECT.value, RouteName.BLOCKED.value}
+                and (
+                    answer.requires_human_validation
+                    or (judge is not None and not judge.approved)
+                )
+            )
+        )
         # Só rodamos a limpeza se não for uma resposta bloqueada padrão
-        safe_text = guardrail_saida(answer.answer) if state.get("route") != RouteName.BLOCKED.value else answer.answer
-        safe_answer = answer.model_copy(update={"answer": safe_text})
+        safe_text = (
+            guardrail_saida(answer.answer, requires_human_validation=requires_human_validation)
+            if route != RouteName.BLOCKED.value
+            else answer.answer
+        )
+        safe_answer = answer.model_copy(update={
+            "answer": safe_text,
+            "requires_human_validation": requires_human_validation,
+        })
         return {"corporate_answer": safe_answer, "messages": [AIMessage(content=safe_answer.answer)]}
 
     def after_input(state: VoltaState) -> Literal["router", "blocked"]:
