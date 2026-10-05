@@ -150,6 +150,15 @@ async def _process_chat(
             judge = JudgeVerdict.model_validate(result["judge"])
 
         answer, citations, specialist, judge = _enforce_judge_verdict(answer, citations, specialist, judge)
+        answer = answer.model_copy(update={
+            "answer": guardrail_saida(
+                answer.answer,
+                requires_human_validation=answer.requires_human_validation,
+            )
+        })
+        citations = [citation for citation in citations if not citation.internal_document]
+        if judge is not None:
+            judge = JudgeVerdict(approved=judge.approved)
         
         # 7. Finalização, persistência e resposta
         await _mongo_call(sessions.append_message, payload.session_id, "assistant", answer.answer, str(request_id))

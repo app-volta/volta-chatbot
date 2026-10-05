@@ -29,6 +29,12 @@ Corpus = Literal["operational", "regulatory", "cooperatives", "history"]
 CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history")
 
 
+def _is_internal_document(metadata: dict, corpus: Corpus | None = None) -> bool:
+    source_name = str(metadata.get("source", "")).replace("\\", "/").rsplit("/", 1)[-1]
+    legacy_volta_pdf = corpus == "operational" and str(metadata.get("title", "")).strip().casefold() == "volta"
+    return bool(metadata.get("internal_document")) or source_name.casefold() == "volta.pdf" or legacy_volta_pdf
+
+
 class FederatedRag:
     def __init__(self, settings: Settings, embeddings: Embeddings | None = None) -> None:
         if not settings.gemini_api_key and embeddings is None:
@@ -276,6 +282,7 @@ class FederatedRag:
                                 "source": str(path),
                                 "title": path.stem,
                                 "page": page_number,
+                                "internal_document": corpus == "operational" and path.name.casefold() == "volta.pdf",
                             },
                         ))
         return self.ingest_documents(corpus, documents)
@@ -301,6 +308,7 @@ class FederatedRag:
                     source_id=str(metadata.get("source_id", "desconhecida")),
                     title=str(metadata.get("title", metadata.get("source", "Documento sem título"))),
                     corpus=corpus,
+                    internal_document=_is_internal_document(metadata, corpus),
                     location=str(metadata.get("page", metadata.get("location", ""))) or None,
                     url=metadata.get("url"),
                     score=round(float(score), 3),
@@ -339,6 +347,7 @@ class FederatedRag:
                     source_id=str(metadata.get("source_id", "desconhecida")),
                     title=str(metadata.get("title", metadata.get("source", "Documento sem título"))),
                     corpus=corpus,
+                    internal_document=_is_internal_document(metadata, corpus),
                     location=str(metadata.get("page", metadata.get("location", ""))) or None,
                     url=metadata.get("url"),
                     score=round(float(result.score), 3),
@@ -392,4 +401,10 @@ class FederatedRag:
 
 
 def serialize_citations(citations: list[SourceCitation]) -> str:
-    return json.dumps([citation.model_dump(mode="json") for citation in citations], ensure_ascii=False)
+    payload = []
+    for citation in citations:
+        if citation.internal_document:
+            payload.append({"corpus": citation.corpus, "excerpt": citation.excerpt})
+        else:
+            payload.append(citation.model_dump(mode="json"))
+    return json.dumps(payload, ensure_ascii=False)

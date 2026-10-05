@@ -22,6 +22,7 @@ class SourceCitation(BaseModel):
     source_id: str
     title: str
     corpus: Literal["operational", "regulatory", "cooperatives", "history"]
+    internal_document: bool = Field(default=False, exclude=True)
     location: str | None = None
     url: str | None = None
     score: float | None = None
@@ -67,7 +68,7 @@ class CorporateAnswer(BaseModel):
     title: str | None = None
     answer: str
     recommended_actions: list[str] = Field(default_factory=list)
-    requires_human_validation: bool = True
+    requires_human_validation: bool = False
 
 # ==============================================================================
 # O CONTRATO DA IA PREDITIVA (Visão Computacional)
