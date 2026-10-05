@@ -24,6 +24,7 @@ class VoltaState(TypedDict, total=False):
     tenant_id: str
     session_id: str
     input_text: str
+    history: list[dict[str, str]]
     clean_input: str
     route: str
     direct_reply: str
@@ -75,13 +76,15 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         return {"route": decision.route.value, "direct_reply": decision.direct_reply or ""}
 
     def triage(state: VoltaState) -> dict:
-        evidence = rag.retrieve_for_route("triage", state["clean_input"])
-        result = team.specialist("triage", state["clean_input"], evidence)
+        evidence = rag.retrieve_for_route("triage", state["clean_input"], state.get("tenant_id"))
+        result = team.specialist("triage", state["clean_input"], evidence, history=state.get("history", []))
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def standards(state: VoltaState) -> dict:
-        evidence = rag.retrieve_for_route("standards", state["clean_input"])
-        result = team.specialist("standards", state["clean_input"], evidence)
+        evidence = rag.retrieve_for_route("standards", state["clean_input"], state.get("tenant_id"))
+        with team.collect_norm_citations() as external_evidence:
+            result = team.specialist("standards", state["clean_input"], evidence, history=state.get("history", []))
+        evidence = [*evidence, *external_evidence]
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def data(state: VoltaState) -> dict:
@@ -90,8 +93,10 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             rows = team.postgres.consultar_metricas_esg(month, year, state.get("tenant_id"))
         except Exception:
             rows = [{"availability": "Dados indisponíveis para consulta no momento.", "month": month, "year": year}]
-        evidence = [_db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)]
-        result = team.specialist("data", state["clean_input"], evidence, rows)
+        db_evidence = _db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)
+        contextual_evidence = rag.retrieve_for_route("data", state["clean_input"], state.get("tenant_id"))
+        evidence = [db_evidence, *contextual_evidence]
+        result = team.specialist("data", state["clean_input"], evidence, rows, history=state.get("history", []))
         return {"evidence": evidence, "database_data": rows, "specialist": result}
 
     def performance(state: VoltaState) -> dict:
@@ -99,9 +104,9 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             rows = team.postgres.consultar_performance_cooperativas(state.get("tenant_id"))
         except Exception:
             rows = [{"availability": "Indicadores de cooperativas indisponíveis para consulta no momento."}]
-        rag_evidence = rag.retrieve_for_route("performance", state["clean_input"])
+        rag_evidence = rag.retrieve_for_route("performance", state["clean_input"], state.get("tenant_id"))
         evidence = [_db_citation("Indicadores de cooperativas do PostgreSQL", "postgres-cooperatives", rows), *rag_evidence]
-        result = team.specialist("performance", state["clean_input"], evidence, rows)
+        result = team.specialist("performance", state["clean_input"], evidence, rows, history=state.get("history", []))
         return {"evidence": evidence, "database_data": rows, "specialist": result}
 
     def judge(state: VoltaState) -> dict:
@@ -123,15 +128,34 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             title="Solicitação bloqueada",
             answer=state.get("direct_reply", "A solicitação não pode ser processada pelas diretrizes de segurança do VOLTA."),
             recommended_actions=["Reformule a solicitação dentro do escopo de gestão operacional de resíduos."],
-            requires_human_validation=True,
+            requires_human_validation=False,
         )
         return {"corporate_answer": answer}
 
     def output_guardrail(state: VoltaState) -> dict:
         answer = state["corporate_answer"]
+        route = state.get("route")
+        judge = state.get("judge")
+        requires_human_validation = (
+            route == RouteName.TRIAGE.value
+            or (
+                route not in {RouteName.DIRECT.value, RouteName.BLOCKED.value}
+                and (
+                    answer.requires_human_validation
+                    or (judge is not None and not judge.approved)
+                )
+            )
+        )
         # Só rodamos a limpeza se não for uma resposta bloqueada padrão
-        safe_text = guardrail_saida(answer.answer) if state.get("route") != RouteName.BLOCKED.value else answer.answer
-        safe_answer = answer.model_copy(update={"answer": safe_text})
+        safe_text = (
+            guardrail_saida(answer.answer, requires_human_validation=requires_human_validation)
+            if route != RouteName.BLOCKED.value
+            else answer.answer
+        )
+        safe_answer = answer.model_copy(update={
+            "answer": safe_text,
+            "requires_human_validation": requires_human_validation,
+        })
         return {"corporate_answer": safe_answer, "messages": [AIMessage(content=safe_answer.answer)]}
 
     def after_input(state: VoltaState) -> Literal["router", "blocked"]:

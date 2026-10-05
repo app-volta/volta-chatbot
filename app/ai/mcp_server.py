@@ -1,30 +1,28 @@
-"""Servidor MCP read-only para integrações corporativas autorizadas.
-
-Execute separadamente: python -m app.mcp_server
-"""
-
-import json
+"""MCP server exposing read-only tools for external environmental norms."""
 
 from mcp.server.fastmcp import FastMCP
 
-from app.core.config import get_settings
-from app.pg_tools import PostgresRepository
+from app.ai.norms_catalog import detail_norm, search_norms
 
-mcp = FastMCP("VOLTA Corporate Tools")
+mcp = FastMCP(
+    "VOLTA Environmental Norms",
+    instructions=(
+        "Pesquisa e detalha atos do catálogo público do Ministério do Meio Ambiente. "
+        "Os resultados são informativos e não substituem validação jurídica ou técnica."
+    ),
+)
 
 
 @mcp.tool()
-def consultar_metricas_esg(mes: int, ano: int, tenant_id: str) -> str:
-    """Retorna métricas ESG agregadas e somente leitura para um tenant autorizado."""
-    if not 1 <= mes <= 12:
-        raise ValueError("mes deve estar entre 1 e 12")
-    settings = get_settings()
-    repository = PostgresRepository(settings.postgres_url)
-    repository.open()
-    try:
-        return json.dumps(repository.consultar_metricas_esg(mes, ano, tenant_id), ensure_ascii=False, default=str)
-    finally:
-        repository.close()
+def buscar_normas_residuos(termo: str, ano: int | None = None, assunto: str | None = None, limite: int = 5) -> dict:
+    """Busca atos ambientais por palavras-chave na ementa, assunto ou título."""
+    return search_norms(termo, year=ano, subject=assunto, limit=limite)
+
+
+@mcp.tool()
+def detalhar_norma(document_key: str) -> dict:
+    """Retorna o registro completo de uma norma usando o document_key de uma busca."""
+    return detail_norm(document_key)
 
 
 if __name__ == "__main__":

@@ -13,7 +13,10 @@ def test_blocks_prompt_injection() -> None:
     assert result.blocked
 
 
-def test_output_never_restores_pii_and_adds_human_validation() -> None:
-    result = guardrail_saida("O CPF é 123.456.789-09 e este procedimento é 100% seguro.")
+def test_output_never_restores_pii_and_adds_requested_human_validation() -> None:
+    result = guardrail_saida(
+        "O CPF é 123.456.789-09 e este procedimento é 100% seguro.",
+        requires_human_validation=True,
+    )
     assert "123.456.789-09" not in result
     assert "homologada pelo responsável técnico" in result

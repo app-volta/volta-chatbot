@@ -1,33 +1,108 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
-# Aqui está o segredo: Usamos o agente nativo do LangGraph no lugar do AgentExecutor antigo!
 from langgraph.prebuilt import create_react_agent
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
+from mcp.shared.memory import create_connected_server_and_client_session
+from mcp.shared.exceptions import McpError
+import httpx
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
 
+from app.core.request_context import log_exception_without_details
 from app.core.config import Settings
 from app.ai.multi_rag import FederatedRag, serialize_citations
 from app.core.observability import Observability
 from app.db.storage import PostgresRepository
-from prompts import (
+from app.ai.prompts import (
     DATA_PROMPT,
     JUDGE_PROMPT,
     ORCHESTRATOR_PROMPT,
     PERFORMANCE_PROMPT,
     ROUTER_PROMPT,
+    SESSION_SUMMARY_PROMPT,
     STANDARDS_PROMPT,
     TRIAGE_PROMPT,
     temporal_context,
 )
-from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SpecialistResult
+from app.db.models import CorporateAnswer, JudgeVerdict, RouteDecision, SessionSummary, SourceCitation, SpecialistResult
+from app.ai.mcp_server import mcp as norms_mcp_server
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
+logger = logging.getLogger(__name__)
+SPECIALIST_RECURSION_LIMIT = 12
+
+
+class _NormsToolError(RuntimeError):
+    pass
+
+
+_NORMS_RECOVERABLE_ERRORS = (httpx.HTTPError, OSError, TimeoutError, McpError, json.JSONDecodeError, _NormsToolError)
+
+
+def _is_recoverable_norms_error(exc: BaseException) -> bool:
+    if isinstance(exc, BaseExceptionGroup):
+        return all(_is_recoverable_norms_error(item) for item in exc.exceptions)
+    return isinstance(exc, _NORMS_RECOVERABLE_ERRORS)
+
+
+def _call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def call() -> dict[str, Any]:
+        async with create_connected_server_and_client_session(norms_mcp_server) as session:
+            response = await session.call_tool(tool_name, arguments)
+        if response.isError:
+            raise _NormsToolError("MCP retornou erro ao consultar o catálogo.")
+        text = next((block.text for block in response.content if hasattr(block, "text")), None)
+        if text is None:
+            raise _NormsToolError("MCP retornou resposta sem conteúdo textual.")
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise _NormsToolError("MCP retornou formato de dados inválido.")
+        return payload
+
+    try:
+        return asyncio.run(call())
+    except ExceptionGroup as exc:
+        if not _is_recoverable_norms_error(exc):
+            raise
+        log_exception_without_details(logger, "Norms MCP call failed; continuing with available RAG evidence", exc)
+        return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+    except _NORMS_RECOVERABLE_ERRORS as exc:
+        log_exception_without_details(logger, "Norms MCP call failed; continuing with available RAG evidence", exc)
+        return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+
+
+def _norm_citations(payload: dict[str, Any]) -> list[SourceCitation]:
+    # Só o registro detalhado entra em citações; resultados candidatos da busca não são evidência usada.
+    record = payload.get("norma")
+    if not isinstance(record, dict) or not record.get("ato_normativo") or not record.get("document_key"):
+        return []
+    excerpt = payload.get("texto_integral") or record.get("ementa", "")
+    return [SourceCitation(
+        source_id=f"mma-{record['document_key']}",
+        title=record["ato_normativo"],
+        corpus="regulatory",
+        location=record.get("assunto") or record.get("ano"),
+        url=record.get("url") or None,
+        excerpt=excerpt[:6000],
+        retrieved_at=datetime.now(UTC),
+    )]
+
+
+def _evidence_payload(citation: SourceCitation) -> dict[str, Any]:
+    if citation.internal_document:
+        return {"corpus": citation.corpus, "excerpt": citation.excerpt}
+    return citation.model_dump(mode="json")
+
 
 class AgentTeam:
     def __init__(self, settings: Settings, rag: FederatedRag, postgres: PostgresRepository, telemetry: Observability) -> None:
@@ -35,6 +110,9 @@ class AgentTeam:
         self.rag = rag
         self.postgres = postgres
         self.telemetry = telemetry
+        self._norm_citation_sink: ContextVar[list[SourceCitation] | None] = ContextVar(
+            f"norm_citations_{id(self)}", default=None
+        )
         self.router_model, self.router_model_name = self._router_model()
         self.specialist_model, self.specialist_model_name = self._specialist_model()
         self._create_agents()
@@ -73,6 +151,7 @@ class AgentTeam:
                 timeout=45,
                 max_retries=2,
             )
+            self._specialist_primary_model = primary
             if self.settings.groq_api_key:
                 fallback = ChatGroq(
                     model=self.settings.groq_router_model,
@@ -81,14 +160,36 @@ class AgentTeam:
                     timeout=45,
                     max_retries=2,
                 )
+                self._specialist_fallback_model = fallback
                 return primary.with_fallbacks([fallback]), f"gemini:{self.settings.gemini_model}"
+            self._specialist_fallback_model = None
             return primary, f"gemini:{self.settings.gemini_model}"
-        return self._router_model()
+        model, model_name = self._router_model()
+        self._specialist_primary_model = model
+        self._specialist_fallback_model = None
+        return model, model_name
+
+    def _structured_specialist(self, schema: type[SchemaT]):
+        parser = self._specialist_primary_model.with_structured_output(schema)
+        if self._specialist_fallback_model is not None:
+            parser = parser.with_fallbacks([
+                self._specialist_fallback_model.with_structured_output(schema)
+            ])
+        return parser
 
     def _create_agents(self) -> None:
+        def call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> str:
+            payload = _call_norms_mcp(tool_name, arguments)
+            sink = self._norm_citation_sink.get()
+            if sink is not None:
+                for citation in _norm_citations(payload):
+                    if all(item.source_id != citation.source_id for item in sink):
+                        sink.append(citation)
+            return json.dumps(payload, ensure_ascii=False)
+
         @tool
         def consultar_rag_operacional(query: str) -> str:
-            """Consulta manuais industriais e FISPQs indexados, com fonte e trecho."""
+            """Consulta conteúdo de manuais industriais e FISPQs sem expor metadados internos."""
             return serialize_citations(self.rag.retrieve("operational", query))
 
         @tool
@@ -102,35 +203,54 @@ class AgentTeam:
             return serialize_citations(self.rag.retrieve("cooperatives", query))
 
         @tool
-        def consultar_metricas_esg(month: int, year: int) -> str:
-            """Consulta agregados ESG de leitura no PostgreSQL. Mes deve estar entre 1 e 12."""
-            if not 1 <= month <= 12:
-                return json.dumps({"erro": "Mês inválido"})
-            return json.dumps(self.postgres.consultar_metricas_esg(month, year), default=str, ensure_ascii=False)
+        def buscar_normas_residuos(termo: str, ano: int | None = None, assunto: str | None = None, limite: int = 5) -> str:
+            """Pesquisa legislação ambiental fora do RAG no catálogo oficial do MMA."""
+            return call_norms_mcp(
+                "buscar_normas_residuos",
+                {"termo": termo, "ano": ano, "assunto": assunto, "limite": limite},
+            )
 
         @tool
-        def consultar_performance_cooperativas() -> str:
-            """Consulta indicadores de SLA e resposta de cooperativas no PostgreSQL."""
-            return json.dumps(self.postgres.consultar_performance_cooperativas(), default=str, ensure_ascii=False)
+        def detalhar_norma(document_key: str) -> str:
+            """Detalha um resultado do catálogo externo; use o document_key retornado pela busca."""
+            return call_norms_mcp("detalhar_norma", {"document_key": document_key})
 
         # 1. Agentes Controladores -> Usam Structured Output puro
         prompt_router = ChatPromptTemplate.from_messages([("system", ROUTER_PROMPT.format(now=temporal_context())), ("user", "{input}")])
         self.router = prompt_router | self.router_model.with_structured_output(RouteDecision)
 
         prompt_judge = ChatPromptTemplate.from_messages([("system", JUDGE_PROMPT), ("user", "{input}")])
-        self.judge = prompt_judge | self.specialist_model.with_structured_output(JudgeVerdict)
+        self.judge = prompt_judge | self._structured_specialist(JudgeVerdict)
 
         prompt_orchestrator = ChatPromptTemplate.from_messages([("system", ORCHESTRATOR_PROMPT), ("user", "{input}")])
         self.orchestrator = prompt_orchestrator | self.router_model.with_structured_output(CorporateAnswer)
 
         # 2. Especialistas com Tools -> Construídos nativamente com o LangGraph
         def _build_specialist(prompt_text, tools):
-            return create_react_agent(self.specialist_model, tools=tools, prompt=prompt_text)
+            return create_react_agent(
+                self.specialist_model,
+                tools=tools,
+                prompt=prompt_text,
+            )
 
         self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
-        self.standards = _build_specialist(STANDARDS_PROMPT, [consultar_rag_operacional, consultar_rag_regulatorio])
-        self.data = _build_specialist(DATA_PROMPT, [consultar_metricas_esg])
-        self.performance = _build_specialist(PERFORMANCE_PROMPT, [consultar_rag_cooperativas, consultar_performance_cooperativas])
+        self.standards = _build_specialist(
+            STANDARDS_PROMPT,
+            [consultar_rag_operacional, consultar_rag_regulatorio, buscar_normas_residuos, detalhar_norma],
+        )
+        # Dados do banco já chegam filtrados pelo tenant autenticado no grafo.
+        # Não exponha consultas SQL a tools escolhidas pelo modelo.
+        self.data = _build_specialist(DATA_PROMPT, [])
+        self.performance = _build_specialist(PERFORMANCE_PROMPT, [consultar_rag_cooperativas])
+
+    @contextmanager
+    def collect_norm_citations(self):
+        citations: list[SourceCitation] = []
+        token = self._norm_citation_sink.set(citations)
+        try:
+            yield citations
+        finally:
+            self._norm_citation_sink.reset(token)
 
     def _invoke_controller(self, name: str, runnable: Any, model: str, payload: str) -> Any:
         started = self.telemetry.timer()
@@ -145,22 +265,28 @@ class AgentTeam:
     def _invoke_specialist(self, name: str, executor: Any, model: str, payload: str) -> SpecialistResult:
         started = self.telemetry.timer()
         try:
-            # O React Agent do LangGraph espera as mensagens nesse formato
-            result = executor.invoke({"messages": [("user", payload)]})
-            
-            # A resposta final do agente fica na última mensagem devolvida
-            final_text = result["messages"][-1].content
-            
-            # Forçamos a saída para o formato estruturado Pydantic
-            structured_parser = self.specialist_model.with_structured_output(SpecialistResult)
-            parsed = structured_parser.invoke(f"Converta essa resposta para JSON: {final_text}")
-            
+            result = executor.invoke(
+                {"messages": [("user", payload)]},
+                config={"recursion_limit": SPECIALIST_RECURSION_LIMIT},
+            )
+            final_message = result["messages"][-1]
+            content = final_message.content
+            if isinstance(content, list):
+                content = "".join(
+                    block.get("text", "") for block in content if isinstance(block, dict)
+                )
+            try:
+                parsed = SpecialistResult.model_validate_json(content)
+            except (ValueError, TypeError):
+                parsed = self._structured_specialist(SpecialistResult).invoke(
+                    "Converta a resposta abaixo para SpecialistResult. Preserve apenas informações fornecidas; "
+                    "se campos não se aplicarem, use null. Resposta: " + str(content)
+                )
+
             self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
             return parsed
         except Exception as exc:
-            print(f"\n❌❌❌ ERRO FATAL NO AGENTE {name} ❌❌❌")
-            print(exc) 
-            print("❌" * 30 + "\n")
+            log_exception_without_details(logger, f"Specialist {name} failed", exc)
 
             self.telemetry.record_agent(name, model, started, payload, str(exc), failed=True)
             raise RuntimeError(f"Falha controlada no especialista {name}.") from exc
@@ -168,19 +294,52 @@ class AgentTeam:
     def route(self, message: str) -> RouteDecision:
         return self._invoke_controller("router", self.router, self.router_model_name, f"Data UTC: {temporal_context()}\n\nMensagem: {message}")
 
-    def specialist(self, route: str, message: str, evidence: list, data: list[dict] | None = None) -> SpecialistResult:
+    def specialist(
+        self,
+        route: str,
+        message: str,
+        evidence: list,
+        data: list[dict] | None = None,
+        *,
+        history: list[dict[str, str]] | None = None,
+    ) -> SpecialistResult:
         selected = {"triage": self.triage, "standards": self.standards, "data": self.data, "performance": self.performance}[route]
-        context = {"message": message, "evidence": [item.model_dump(mode="json") for item in evidence], "database_data": data or []}
-        return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False))
+        context = {
+            "message": message,
+            "conversation_history": history or [],
+            "evidence": [_evidence_payload(item) for item in evidence],
+            "database_data": data or [],
+        }
+        return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
 
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:
         context = {
             "specialist_result": specialist.model_dump(mode="json"),
-            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "evidence": [_evidence_payload(item) for item in evidence],
             "database_data": data or [],
         }
-        return self._invoke_controller("judge", self.judge, self.specialist_model_name, json.dumps(context, ensure_ascii=False))
+        return self._invoke_controller("judge", self.judge, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
+
+    def summarize_session(self, messages: list[dict[str, Any]]) -> str:
+        context = [
+            {"role": message.get("role"), "content": str(message.get("content", ""))[:2000]}
+            for message in messages
+            if message.get("role") in {"user", "assistant"} and message.get("content")
+        ]
+        if not context:
+            return ""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", SESSION_SUMMARY_PROMPT),
+            ("user", "Mensagens da sessão:\n{input}"),
+        ]) | self._structured_specialist(SessionSummary)
+        result = self._invoke_controller(
+            "session_summary",
+            prompt,
+            self.specialist_model_name,
+            json.dumps(context, ensure_ascii=False),
+        )
+        return result.summary.strip()
 
     def format_answer(self, route: str, specialist: SpecialistResult | None, judge: JudgeVerdict | None, direct_reply: str | None = None) -> CorporateAnswer:
         context = {"route": route, "specialist": specialist.model_dump(mode="json") if specialist else None, "judge": judge.model_dump(mode="json") if judge else None, "direct_reply": direct_reply}
-        return self._invoke_controller("orchestrator", self.orchestrator, self.router_model_name, json.dumps(context, ensure_ascii=False))
+        return self._invoke_controller("orchestrator", self.orchestrator, self.router_model_name, json.dumps(context, ensure_ascii=False, default=str))

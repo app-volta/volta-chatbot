@@ -2,8 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-from typing import Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # ==============================================================================
 # ENUMS
@@ -23,6 +22,7 @@ class SourceCitation(BaseModel):
     source_id: str
     title: str
     corpus: Literal["operational", "regulatory", "cooperatives", "history"]
+    internal_document: bool = Field(default=False, exclude=True)
     location: str | None = None
     url: str | None = None
     score: float | None = None
@@ -46,6 +46,14 @@ class TriageAnalysis(BaseModel):
     unidades: str | None = Field(default=None, description="Ex: 11 un. (caixas/fardos)")
     confianca_ia: int = Field(description="Porcentagem de certeza da IA (0 a 100)")
     recomendacao_automatica: str = Field(description="Dica curta de armazenamento. Ex: Guarde num lugar seco.")
+    mobile_summary: str = Field(description="Resumo para leitura rápida no aplicativo, com no máximo 20 palavras.")
+
+    @field_validator("mobile_summary")
+    @classmethod
+    def limit_mobile_summary_words(cls, value: str) -> str:
+        if len(value.split()) > 20:
+            raise ValueError("mobile_summary deve ter no máximo 20 palavras.")
+        return value
 
 class SpecialistResult(BaseModel):
     proposed_occurrence: ProposedOccurrence | None = None
@@ -60,6 +68,7 @@ class CorporateAnswer(BaseModel):
     title: str | None = None
     answer: str
     recommended_actions: list[str] = Field(default_factory=list)
+    requires_human_validation: bool = False
 
 # ==============================================================================
 # O CONTRATO DA IA PREDITIVA (Visão Computacional)
@@ -71,7 +80,7 @@ class AnaliseResiduoIA(BaseModel):
     ai_contamination_level: str = Field(
         description="Nível de contaminação estimado: 'BAIXO', 'MEDIO' ou 'ALTO'."
     )
-    estimated_quantity_kg: Optional[float] = Field(
+    estimated_quantity_kg: float | None = Field(
         None, 
         description="Estimativa visual de peso em kg. Se não for possível deduzir pela imagem, retorne null."
     )
@@ -81,16 +90,16 @@ class AnaliseResiduoIA(BaseModel):
     report_text: str = Field(
         description="Um laudo descritivo resumindo o que foi detectado na imagem."
     )    
+    mobile_summary: str = Field(
+        description="Resumo ultra curto de no máximo 20 palavras focado no mobile para caber no card verde."
+    )
 
 # ==============================================================================
 # REQUESTS & RESPONSES (ENDPOINTS)
 # ==============================================================================
 class ChatRequest(BaseModel):
-    session_id: str
-    tenant_id: str
-    user_id: str
-    message: str
-    image_base64: str | None = None
+    session_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=6000)
 
 class ChatResponse(BaseModel):
     request_id: UUID
@@ -102,32 +111,38 @@ class ChatResponse(BaseModel):
     triage_analysis: TriageAnalysis | None = None
     judge: JudgeVerdict | None = None
 
+
+class AIManagementSummary(BaseModel):
+    problema_analisado: str = Field(min_length=1, max_length=2000)
+    recomendacoes: list[str] = Field(default_factory=list, max_length=5)
+
 class OccurrenceDraftCreate(BaseModel):
-    company_id: int
-    area_id: int
-    user_id: int
+    area_id: UUID
+    employee_description: str = Field(default="", max_length=2000)
+    priority: str = Field(default="MEDIA", min_length=1, max_length=30)
     ai_data: AnaliseResiduoIA 
 
 class OccurrenceDraftResponse(BaseModel):
-    draft_id: int
+    draft_id: UUID
     status: str
-
-class ApprovalRequest(BaseModel):
-    approved_by: str
 
 class ApprovalResponse(BaseModel):
-    occurrence_id: int
+    occurrence_id: UUID
     status: str
-
-class SessionCreateRequest(BaseModel):
-    tenant_id: str
-    user_id: str
 
 class SessionResponse(BaseModel):
     session_id: str
     tenant_id: str
     user_id: str
     created_at: datetime
+
+class SessionCloseResponse(BaseModel):
+    session_id: str
+    closed_at: datetime
+    summary_indexed: bool
+
+class SessionSummary(BaseModel):
+    summary: str = Field(min_length=1, max_length=4000)
 
 class ExternalSourceRequest(BaseModel):
     corpus: Literal["operational", "regulatory", "cooperatives", "history"]
@@ -142,4 +157,7 @@ class CollectionRequest(BaseModel):
     
 class GuardrailResult(BaseModel):
     allowed: bool
+    blocked: bool = False
+    sanitized_text: str = ""
+    pii_tokens: dict[str, str] = Field(default_factory=dict)
     reason: str | None = None

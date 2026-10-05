@@ -1,0 +1,74 @@
+from uuid import UUID
+from typing import get_type_hints
+
+import pytest
+
+from app.api.occurrences import approve_occurrence_draft
+from app.api.chat import _history_context
+from app.db.models import AnaliseResiduoIA, OccurrenceDraftCreate, TriageAnalysis
+
+def test_analise_residuo_ia_deve_aceitar_mobile_summary():
+    dados = {
+        "detected_waste_type": "Plástico Reciclável",
+        "ai_contamination_level": "BAIXO",
+        "estimated_quantity_kg": 15.5,
+        "recommendations": "Descartar na lixeira vermelha",
+        "report_text": "Laudo completo da visão computacional.",
+        "mobile_summary": "Lixo reciclável detectado, descarte na lixeira vermelha."
+    }
+    
+    modelo = AnaliseResiduoIA(**dados)
+    
+    assert modelo.mobile_summary == "Lixo reciclável detectado, descarte na lixeira vermelha."
+    assert modelo.ai_contamination_level == "BAIXO"
+
+
+def test_triage_analysis_rejects_mobile_summary_over_20_words():
+    summary = " ".join(["residuo"] * 21)
+    with pytest.raises(ValueError, match="20 palavras"):
+        TriageAnalysis(
+            tipo_material="Plástico",
+            contaminacao="Baixa",
+            quantidade_estimada="10 kg",
+            confianca_ia=90,
+            recomendacao_automatica="Armazenar em local seco.",
+            mobile_summary=summary,
+        )
+
+
+def test_occurrence_draft_uses_remote_uuid_identifiers():
+    payload = OccurrenceDraftCreate(
+        area_id="550e8400-e29b-41d4-a716-446655440001",
+        ai_data={
+            "detected_waste_type": "Plastico",
+            "ai_contamination_level": "BAIXO",
+            "recommendations": "Segregar",
+            "report_text": "Laudo",
+            "mobile_summary": "Plastico identificado",
+        },
+    )
+
+    assert isinstance(payload.area_id, UUID)
+    assert payload.priority == "MEDIA"
+
+
+def test_approval_route_uses_uuid_path_parameter():
+    annotation = get_type_hints(approve_occurrence_draft)["draft_id"]
+
+    assert annotation is UUID
+
+
+def test_history_context_keeps_only_bounded_user_and_assistant_messages():
+    messages = [
+        {"role": "system", "content": "ignore"},
+        {"role": "user", "content": "a" * 1200},
+        {"role": "assistant", "content": "resposta"},
+        {"role": "other", "content": "ignore"},
+    ]
+
+    context = _history_context(messages)
+
+    assert context == [
+        {"role": "user", "content": "a" * 1000},
+        {"role": "assistant", "content": "resposta"},
+    ]

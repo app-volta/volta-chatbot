@@ -2,6 +2,8 @@ from fastapi import Request
 from app.core.config import get_settings
 from app.core.observability import Observability
 from app.ai.graph import build_volta_graph
+from app.ai.multi_rag import FederatedRag
+from app.ai.agents import AgentTeam
 
 # Importando as instâncias e tipagens do nosso novo repositório centralizado
 from app.db.storage import db_postgres, db_mongo, PostgresRepository, SessionRepository
@@ -23,3 +25,9 @@ def get_telemetry(request: Request) -> Observability:
 def get_graph(request: Request):
     """Injeta o ecossistema multiagente (LangGraph)."""
     return request.app.state.graph
+
+def get_rag(request: Request) -> FederatedRag:
+    return request.app.state.rag
+
+def get_agent_team(request: Request) -> AgentTeam:
+    return request.app.state.team

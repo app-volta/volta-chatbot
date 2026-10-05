@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, HttpUrl, SecretStr
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     app_name: str = "VOLTA API"
-    environment: Literal["development", "test", "production"] = "development"
+    environment: Literal["qa", "prod"] = "qa"
     api_prefix: str = "/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
@@ -20,10 +20,19 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr | None = None
     groq_router_model: str = "llama-3.3-70b-versatile"
 
-    postgres_dsn: SecretStr = SecretStr("postgresql://volta:volta@localhost:5432/volta")
-    mongo_uri: SecretStr = SecretStr("mongodb://localhost:27017/volta_memory?replicaSet=rs0")
+    postgres_dsn: SecretStr = Field(
+        default=SecretStr("postgresql://volta:volta@localhost:5432/volta"),
+        validation_alias=AliasChoices("POSTGRES_DSN", "POSTGRES_URL"),
+    )
+    mongo_uri: SecretStr = Field(
+        default=SecretStr("mongodb://localhost:27017/volta_memory?replicaSet=rs0"),
+        validation_alias=AliasChoices("MONGODB_URL", "MONGO_URI"),
+    )
 
     rag_base_path: str = "./data/faiss"
+    qdrant_url: str | None = None
+    qdrant_api_key: SecretStr | None = None
+    qdrant_collection_prefix: str = "volta"
     source_download_timeout_seconds: int = 20
     allowed_source_hosts: set[str] = {"sdgs.un.org", "www.gov.br", "jbsesg.com", "ambientaljbs.com.br"}
 
@@ -31,6 +40,7 @@ class Settings(BaseSettings):
     cooperative_a2a_hmac_secret: SecretStr | None = None
     a2a_timeout_seconds: int = 10
     ingestion_api_key: SecretStr | None = None
+    jwt_key: SecretStr | None = Field(default=None, validation_alias="JWT_KEY")
 
     # Estimativas configuráveis, para o painel acadêmico de custo/ROI.
     gemini_input_usd_per_million: float = 0.30

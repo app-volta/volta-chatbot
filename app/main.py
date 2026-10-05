@@ -1,5 +1,8 @@
 from contextlib import asynccontextmanager
+import logging
+import uuid
 from fastapi import FastAPI, status, HTTPException
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.mongodb import MongoDBSaver
 
@@ -10,7 +13,16 @@ from app.ai.multi_rag import FederatedRag
 from app.ai.agents import AgentTeam
 from app.ai.graph import build_volta_graph
 from app.db.storage import db_postgres, db_mongo
-from app.api import sessions
+from app.api import sessions, observability
+from app.core.request_context import RequestIdFilter, request_id_context
+
+
+_handler = logging.StreamHandler()
+logging.basicConfig(level=logging.INFO, handlers=[_handler])
+_formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s")
+for _configured_handler in logging.getLogger().handlers:
+    _configured_handler.setFormatter(_formatter)
+    _configured_handler.addFilter(RequestIdFilter())
 
 
 @asynccontextmanager
@@ -33,6 +45,8 @@ async def lifespan(app: FastAPI):
 
     # 4. Registro no state para injeção de dependência nas rotas
     app.state.telemetry = telemetry
+    app.state.rag = rag
+    app.state.team = team
     app.state.graph = graph
 
     yield
@@ -49,13 +63,25 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.middleware("http")
+async def attach_request_id(request, call_next):
+    request_id = str(uuid.uuid4())
+    token = request_id_context.set(request_id)
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        request_id_context.reset(token)
+
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=get_settings().cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST"],
-    allow_headers=["content-type", "x-admin-key"],
+    allow_headers=["authorization", "content-type", "x-admin-key"],
 )
 
 
@@ -81,3 +107,11 @@ def health() -> dict:
 app.include_router(chat.router, prefix="/v1/chat", tags=["Chat & IA"])
 app.include_router(occurrences.router, prefix="/v1/occurrences", tags=["Ocorrências"])
 app.include_router(sessions.router, prefix="/v1/sessions", tags=["Sessões"])
+app.include_router(observability.router, prefix="/v1/observability", tags=["Observabilidade"])
+
+
+@app.get("/metrics", include_in_schema=False)
+def metrics() -> Response:
+    """Endpoint de scraping Prometheus sem conteúdo de requisições."""
+    payload, content_type = Observability.prometheus_payload()
+    return Response(content=payload, headers={"Content-Type": content_type})

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
+from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
@@ -15,7 +16,17 @@ from psycopg_pool import ConnectionPool
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 
-from app.db.models import ProposedOccurrence
+def _company_id_from_tenant(tenant_id: str | None) -> UUID | None:
+    """Valida o tenant e preserva UUIDs usados pelo schema remoto."""
+    if tenant_id is None:
+        return None
+    value = tenant_id.strip()
+    if not value:
+        return None
+    try:
+        return UUID(value)
+    except ValueError:
+        return None
 
 
 # ==============================================================================
@@ -34,6 +45,29 @@ class PostgresRepository:
             kwargs={"row_factory": dict_row, "prepare_threshold": None},
             open=True,
         )
+        
+    def get_incident_history_by_area(self, area_id: UUID | str, tenant_id: str | None = None) -> list[dict]:
+        """Busca o historico de peso de lixo de uma cacamba especifica para treinar a IA."""
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            return []
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    DATE(registered_at) AS data_registro,
+                    SUM(estimated_quantity) AS peso_total_dia
+                FROM incident
+                WHERE area_id = %s
+                  AND estimated_quantity IS NOT NULL
+                  AND (%s::uuid IS NULL OR company_id = %s)
+                GROUP BY DATE(registered_at)
+                ORDER BY data_registro ASC;
+                """,
+                (area_id, company_id, company_id)
+            )
+            # Formata a data para string e o peso para float para facilitar o trabalho do Pandas
+            return [{"data_registro": str(row["data_registro"]), "peso_total_dia": float(row["peso_total_dia"])} for row in cursor.fetchall()]    
 
     def close(self) -> None:
         """Encerra a pool (Chamado no teardown do lifespan)."""
@@ -50,28 +84,59 @@ class PostgresRepository:
         except Exception:
             return False
 
+    def get_user_identity_by_email(self, email: str) -> dict | None:
+        """Resolve a identidade do JWT para os UUIDs atuais do usuário e da empresa."""
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT u.id AS user_id, u.company_id AS tenant_id, r.type AS role "
+                "FROM users u JOIN role r ON r.id = u.role_id WHERE u.email = %s LIMIT 1",
+                (email,),
+            )
+            return cursor.fetchone()
+
     def create_occurrence_draft(
-        self, company_id: int, area_id: int, user_id: int, ai_data: dict
-    ) -> int:
+        self,
+        company_id: UUID | str,
+        area_id: UUID | str,
+        user_id: UUID | str,
+        employee_description: str,
+        priority: str,
+        ai_data: dict,
+    ) -> UUID | str:
         """Salva o rascunho do incidente e atrela o laudo da IA a ele."""
+        description = employee_description.strip() or str(ai_data.get("report_text", "")).strip()
+        if not description:
+            raise ValueError("employee_description e obrigatorio.")
+        clean_priority = priority.strip()
+        if not clean_priority:
+            raise ValueError("priority e obrigatorio.")
         with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT 1 FROM area WHERE id = %s AND company_id = %s",
+                (area_id, company_id),
+            )
+            if not cursor.fetchone():
+                raise LookupError("Área não encontrada para esta empresa.")
+
             # 1. Cria o incidente com status pendente (Aguardando validação humana)
             cursor.execute(
                 """
                 INSERT INTO incident (
-                    company_id, area_id, user_id, 
-                    contamination_level, estimated_quantity, status, registered_at
+                    company_id, area_id, user_id, employee_description,
+                    contamination_level, estimated_quantity, priority, status, registered_at
                 ) VALUES (
-                    %(company_id)s, %(area_id)s, %(user_id)s, 
-                    %(contamination)s, %(volume)s, 'AGUARDANDO_VALIDACAO', CURRENT_TIMESTAMP
+                    %(company_id)s, %(area_id)s, %(user_id)s, %(description)s,
+                    %(contamination)s, %(volume)s, %(priority)s, 'AGUARDANDO_VALIDACAO', CURRENT_TIMESTAMP
                 ) RETURNING id;
                 """,
                 {
                     "company_id": company_id,
                     "area_id": area_id,
                     "user_id": user_id,
+                    "description": description,
                     "contamination": ai_data.get("ai_contamination_level", "N/A"),
                     "volume": ai_data.get("estimated_quantity_kg", 0.0),
+                    "priority": clean_priority,
                 }
             )
             incident_id = cursor.fetchone()["id"]
@@ -97,20 +162,51 @@ class PostgresRepository:
             )
             return incident_id
 
-    def approve_occurrence_draft(self, draft_id: int) -> int:
-        """Oficializa o registro mudando o status para REGISTRADA."""
-        with self.pool.connection() as connection, connection.cursor() as cursor:
+    def approve_occurrence_draft(self, draft_id: UUID | str, tenant_id: str, approver_id: str) -> UUID | str:
+        """Atomically approves a pending draft without author self-approval."""
+        company_id = _company_id_from_tenant(tenant_id)
+        try:
+            approver_uuid = UUID(str(approver_id))
+        except (TypeError, ValueError):
+            approver_uuid = None
+        if company_id is None or approver_uuid is None:
+            raise LookupError("Rascunho não encontrado.")
+        with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
             cursor.execute(
-                "UPDATE incident SET status = 'REGISTRADA' WHERE id = %s RETURNING id",
-                (draft_id,)
+                "SELECT 1 FROM users u JOIN role r ON r.id = u.role_id "
+                "WHERE u.id = %s AND u.company_id = %s AND LOWER(TRIM(r.type)) = 'gestor' "
+                "FOR SHARE OF u, r",
+                (approver_uuid, company_id),
+            )
+            if not cursor.fetchone():
+                raise PermissionError("Apenas gestor atual da empresa pode aprovar rascunhos.")
+
+            cursor.execute(
+                "UPDATE incident SET status = 'REGISTRADA' "
+                "WHERE id = %s AND company_id = %s AND status = 'AGUARDANDO_VALIDACAO' "
+                "AND user_id <> %s RETURNING id",
+                (draft_id, company_id, approver_uuid),
             )
             updated = cursor.fetchone()
-            if not updated:
+            if updated:
+                return updated["id"]
+
+            cursor.execute(
+                "SELECT user_id, status FROM incident WHERE id = %s AND company_id = %s",
+                (draft_id, company_id),
+            )
+            current = cursor.fetchone()
+            if current is None:
                 raise LookupError("Rascunho não encontrado.")
-            return updated["id"]
+            if UUID(str(current["user_id"])) == approver_uuid:
+                raise PermissionError("O autor não pode aprovar o próprio rascunho.")
+            raise ValueError("Rascunho já processado.")
         
-    def get_all_drafts(self) -> list[dict]:
+    def get_all_drafts(self, tenant_id: str | None = None) -> list[dict]:
         """Busca os incidentes pendentes junto com o laudo da IA."""
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
@@ -119,47 +215,125 @@ class PostgresRepository:
                 FROM incident i
                 JOIN ai_report a ON i.id = a.incident_id
                 WHERE i.status = 'AGUARDANDO_VALIDACAO'
+                  AND (%s::uuid IS NULL OR i.company_id = %s)
                 ORDER BY i.registered_at DESC
-                """
+                """,
+                (company_id, company_id),
             )
             return cursor.fetchall()    
         
     def consultar_metricas_esg(self, month: int, year: int, tenant_id: str | None = None) -> list[dict]:
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            return []
+        period = f"{year:04d}-{month:02d}"
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT category,
-                       COUNT(*) AS ocorrencias_registradas,
-                       COALESCE(SUM(volume_kg), 0) AS volume_total_kg,
-                       COUNT(*) FILTER (WHERE contamination_risk) AS ocorrencias_com_risco
-                FROM occurrences
-                WHERE created_at >= make_date(%s, %s, 1)
-                  AND created_at < make_date(%s, %s, 1) + INTERVAL '1 month'
-                  AND (%s IS NULL OR tenant_id = %s)
-                GROUP BY category
-                ORDER BY volume_total_kg DESC
+                SELECT company_id,
+                       period,
+                       COALESCE(total_waste_kg, 0) AS total_waste_kg,
+                       COALESCE(total_recycled_kg, 0) AS total_recycled_kg,
+                       COALESCE(recycling_percentage, 0) AS recycling_percentage,
+                       calculated_at
+                FROM esg_metric
+                WHERE period = %s
+                  AND (%s::uuid IS NULL OR company_id = %s)
+                ORDER BY company_id
                 """,
-                (year, month, year, month, tenant_id, tenant_id),
+                (period, company_id, company_id),
             )
             rows = cursor.fetchall()
-            return [{**row, "volume_total_kg": float(row["volume_total_kg"])} for row in rows]
+            return [
+                {
+                    **row,
+                    "total_waste_kg": float(row["total_waste_kg"]),
+                    "total_recycled_kg": float(row["total_recycled_kg"]),
+                    "recycling_percentage": float(row["recycling_percentage"]),
+                }
+                for row in rows
+            ]
 
     def consultar_performance_cooperativas(self, tenant_id: str | None = None) -> list[dict]:
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            return []
         with self.pool.connection() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
-                SELECT cooperative_name,
-                       COUNT(*) AS coletas_concluidas,
-                       ROUND(AVG(response_hours)::numeric, 2) AS tempo_medio_resposta_horas,
-                       ROUND(AVG(CASE WHEN sla_met THEN 1 ELSE 0 END)::numeric * 100, 2) AS cumprimento_sla_percentual
-                FROM cooperative_service_levels
-                WHERE (%s IS NULL OR tenant_id = %s)
-                GROUP BY cooperative_name
+                SELECT c.name AS cooperative_name,
+                       COUNT(*) FILTER (WHERE col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE')) AS coletas_concluidas,
+                       ROUND(AVG(EXTRACT(EPOCH FROM (col.scheduled_at - col.requested_at)))::numeric / 3600, 2) AS tempo_medio_resposta_horas,
+                       ROUND(AVG(CASE WHEN col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE') THEN 1 ELSE 0 END)::numeric * 100, 2) AS cumprimento_sla_percentual
+                FROM collection col
+                JOIN cooperative c ON c.id = col.cooperative_id
+                JOIN incident i ON i.id = col.incident_id
+                WHERE (%s::uuid IS NULL OR i.company_id = %s)
+                GROUP BY c.name
                 ORDER BY cumprimento_sla_percentual DESC, tempo_medio_resposta_horas ASC
                 """,
-                (tenant_id, tenant_id),
+                (company_id, company_id),
             )
             return cursor.fetchall()
+        
+    def get_recent_incidents(self, limit: int = 5, tenant_id: str | None = None) -> list[dict]:
+        """Busca as ultimas ocorrencias para analise da IA."""
+        if limit < 1:
+            return []
+        company_id = _company_id_from_tenant(tenant_id)
+        if company_id is None:
+            return []
+        with self.pool.connection() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT employee_description, contamination_level, estimated_quantity, priority
+                FROM incident
+                WHERE (%s::uuid IS NULL OR company_id = %s)
+                ORDER BY registered_at DESC
+                LIMIT %s;
+                """,
+                (company_id, company_id, limit),
+            )
+            return cursor.fetchall()
+
+    def save_incident(
+        self,
+        company_id: UUID | str,
+        area_id: UUID | str,
+        waste_type_id: UUID | str,
+        user_id: UUID | str,
+        photo_url: str,
+        employee_description: str,
+        contamination_level: str,
+        estimated_quantity: float,
+        priority: str,
+        status: str = "REGISTRADA",
+    ) -> UUID | str:
+        """Salva uma ocorrencia confirmada no banco PostgreSQL."""
+        with self.pool.connection() as connection, connection.transaction(), connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO incident (
+                    company_id, area_id, waste_type_id, user_id, photo_url,
+                    employee_description, contamination_level, estimated_quantity,
+                    priority, status, registered_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                RETURNING id;
+                """,
+                (
+                    company_id,
+                    area_id,
+                    waste_type_id,
+                    user_id,
+                    photo_url,
+                    employee_description,
+                    contamination_level,
+                    estimated_quantity,
+                    priority,
+                    status,
+                ),
+            )
+            return cursor.fetchone()["id"]
 
 
 # ==============================================================================
@@ -178,12 +352,11 @@ class SessionRepository:
         if clean_uri.endswith("?"):
             clean_uri = clean_uri[:-1]
 
-        self.client = MongoClient(
-            clean_uri,
-            directConnection=True,
-            serverSelectionTimeoutMS=5000,
-            appname="volta-api",
-        )
+        options = {"serverSelectionTimeoutMS": 5000, "socketTimeoutMS": 5000, "appname": "volta-api"}
+        authority = urlparse(clean_uri).netloc.rsplit("@", 1)[-1]
+        if not clean_uri.startswith("mongodb+srv://") and "," not in authority:
+            options["directConnection"] = True
+        self.client = MongoClient(clean_uri, **options)
         database = self.client.get_database()
         self.sessions = database["sessions"]
         self.messages = database["chat_messages"]
@@ -230,11 +403,33 @@ class SessionRepository:
             }
         )
 
+    def session_history(self, session_id: str) -> list[dict]:
+        cursor = self.messages.find({"session_id": session_id}).sort("created_at", ASCENDING)
+        return [
+            {key: value for key, value in message.items() if key != "_id"}
+            for message in cursor
+        ]
+
     def recent_history(self, session_id: str, limit: int = 8) -> list[dict]:
         cursor = self.messages.find({"session_id": session_id}).sort("created_at", DESCENDING).limit(limit)
         return list(
             reversed([{key: value for key, value in message.items() if key != "_id"} for message in cursor])
         )
+
+    def close_session(self, session_id: str, tenant_id: str, user_id: str) -> datetime:
+        closed_at = datetime.now(UTC)
+        result = self.sessions.update_one(
+            {
+                "session_id": session_id,
+                "tenant_id": tenant_id,
+                "user_id": user_id,
+                "closed_at": None,
+            },
+            {"$set": {"closed_at": closed_at}},
+        )
+        if result.modified_count != 1:
+            raise PermissionError("Sessão inexistente, encerrada ou não autorizada para este usuário.")
+        return closed_at
 
     def audit_security_event(self, session_id: str, event: str) -> None:
         self.audit.insert_one({"session_id": session_id, "event": event, "created_at": datetime.now(UTC)})
@@ -251,8 +446,7 @@ class SessionRepository:
     def close(self) -> None:
         if self.client is not None:
             self.client.close()
-
-
+            
 # Instâncias globais
 db_postgres = PostgresRepository()
 db_mongo = SessionRepository()
