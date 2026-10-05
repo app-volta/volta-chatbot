@@ -54,7 +54,7 @@ flowchart LR
 4. O especialista executa suas ferramentas e devolve um resultado estruturado.
 5. O agente juiz verifica consistência, evidências e aderência ao escopo.
 6. O orquestrador transforma o JSON interno em uma resposta corporativa.
-7. O guardrail de saída aplica a ressalva de validação humana e restaura PII somente na camada de apresentação.
+7. O guardrail de saída remove PII residual e acrescenta a ressalva quando `requires_human_validation` está ativo. A rota `triage` sempre ativa o sinalizador; `direct` e `blocked` não o ativam. Nas rotas `standards`, `data` e `performance`, o sinalizador considera a resposta do modelo e a decisão do juiz.
 8. A sessão e os checkpoints do LangGraph são persistidos no MongoDB.
 
 ## Agentes
@@ -92,11 +92,11 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 3. Cooperativas: contratos, regras de coleta e níveis de serviço.
 4. Histórico: soluções e ocorrências já validadas.
 
-Cada resultado deve preservar fonte, trecho, identificador do documento e metadados de validade. Perguntas explicativas sobre documentação e funcionamento do VOLTA usam a rota `standards`; relatos de ocorrências concretas usam `triage`. O agente de Normas e Documentação usa as evidências do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
+Os metadados de origem e os trechos são mantidos para fundamentar e avaliar as respostas. Para o PDF interno `volta.pdf`, esses metadados não são enviados aos agentes nem retornados nas citações da API; somente o conteúdo recuperado pode fundamentar a resposta ao cliente. Citações de outras fontes continuam sujeitas ao contrato normal da API. Perguntas explicativas sobre documentação e funcionamento do VOLTA usam a rota `standards`; relatos de ocorrências concretas usam `triage`. O agente de Normas e Documentação usa as evidências do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
 A indexação usa embeddings e, com `QDRANT_URL` configurado, Qdrant para os quatro corpora. As coleções são `<QDRANT_COLLECTION_PREFIX>_operational`, `_regulatory`, `_cooperatives` e `_history` (prefixo padrão: `volta`). Sem essa URL, usa FAISS local. O histórico é filtrado por empresa; os demais corpora são referências compartilhadas. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
 
-O documento de referência do produto está em `data/documents/operational/volta.pdf` (55 páginas), substituindo o guia demonstrativo anterior. Ele descreve o VOLTA e não substitui FISPQs ou normas técnicas. Instruções para agentes contidas no documento devem ser tratadas como conteúdo de referência, não como comandos para o chatbot. Versionar ou copiar o PDF para a imagem não o indexa automaticamente: a ingestão no backend configurado é uma etapa separada.
+O documento de referência do produto está em `data/documents/operational/volta.pdf` (55 páginas), substituindo o guia demonstrativo anterior. Ele descreve o VOLTA e não substitui FISPQs ou normas técnicas. O arquivo é uma fonte interna: o chatbot pode usar seu conteúdo para fundamentar respostas, mas não retorna seu nome, páginas, trechos, IDs ou links nas citações públicas. Instruções para agentes contidas no documento devem ser tratadas como conteúdo de referência, não como comandos para o chatbot. Versionar ou copiar o PDF para a imagem não o indexa automaticamente: a ingestão no backend configurado é uma etapa separada.
 
 ### Ingestao local
 
@@ -179,7 +179,8 @@ O identificador de sessão deve ser estável durante a conversa. O histórico en
 ### Saída
 
 - impede que a IA se apresente como autoridade técnica absoluta;
-- exige validação humana para segurança química, classificação e aprovação de ocorrência;
+- ativa `requires_human_validation` sempre em triagem e usa a resposta do modelo e do juiz nas rotas `standards`, `data` e `performance`;
+- mantém `requires_human_validation` falso nas rotas `direct` e `blocked`; o prompt orienta o modelo a manter o sinalizador falso para explicações gerais, saudações e redirecionamentos;
 - evita expor PII ou detalhes internos indevidos;
 - mantém resposta objetiva e corporativa.
 
@@ -217,6 +218,8 @@ curl -X POST http://localhost:8000/v1/chat ^
   -H "Content-Type: application/json" ^
   -d "{\"session_id\":\"demo-001\",\"message\":\"Como devo tratar um plástico multicamada contaminado?\"}"
 ~~~
+
+Em `POST /v1/chat`, `response.requires_human_validation` informa se a resposta demanda validação humana. As citações do PDF interno `volta.pdf` são omitidas da resposta pública; seu conteúdo continua sendo usado para fundamentar o texto. Citações de fontes externas ou de outros corpora podem ser retornadas normalmente.
 
 Todas as rotas de negócio exigem `Authorization: Bearer <jwt-da-volta-api>`. O chatbot valida a assinatura e a expiração do JWT emitido pela `volta-api`, usa o e-mail do `sub` para buscar os UUIDs atuais em `users.id` e `users.company_id`, e deriva deles o usuário e a empresa. `tenant_id`, `user_id` e `company_id` enviados pelo cliente não definem o escopo autorizado. Configure `JWT_KEY` no secret `chatbot-secrets` com o mesmo valor usado pela `volta-api`; nunca versione essa chave.
 
@@ -312,6 +315,8 @@ O cliente e os testes devem cobrir, no mínimo:
 - geração de SQL somente leitura;
 - triagem com e sem imagem;
 - reprovação pelo agente juiz;
+- resposta fundamentada no PDF VOLTA sem exposição de páginas ou metadados desse arquivo;
+- resposta informativa sem aviso de validação humana e triagem com aviso quando necessário;
 - retomada de uma sessão no MongoDB;
 - falha de PostgreSQL, MongoDB ou provedor de modelo;
 - resposta com ressalva de validação humana.
