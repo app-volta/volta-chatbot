@@ -74,7 +74,8 @@ async def chat(
     graph = Depends(get_graph)
 ) -> ChatResponse:
     started = perf_counter()
-    return await _process_chat(payload, identity, sessions, telemetry, graph, started)
+    with telemetry.chat_request():
+        return await _process_chat(payload, identity, sessions, telemetry, graph, started)
 
 
 async def _process_chat(
@@ -164,7 +165,9 @@ async def _process_chat(
         await _mongo_call(sessions.append_message, payload.session_id, "assistant", answer.answer, str(request_id))
         if judge is not None:
             telemetry.record_judge(judge.approved, human_intervention=not judge.approved)
-        telemetry.record_request(route.value, started, "success", resolved=not judge or judge.approved)
+        if answer.requires_human_validation and (judge is None or judge.approved):
+            telemetry.record_human_intervention("answer_requires_validation")
+        telemetry.record_request(route.value, started, "success")
         
         return ChatResponse(
             request_id=request_id,

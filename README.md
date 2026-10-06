@@ -300,9 +300,41 @@ Os dados devem permitir acompanhar cenários de 100 a 1.000 usuários semanais s
 ### Endpoints de observabilidade
 
 - `GET /metrics`: formato Prometheus para coleta de latência, chamadas, erros, custos, fallbacks e resultados do juiz.
-- `GET /v1/observability/summary?active_users=100&requests_per_user=5`: KPIs observados e projeção semanal de custo, ROI e custo por resolução.
+- `GET /v1/observability/summary?active_users=100&requests_per_user=5`: resumo autenticado de mensagens do chat, latência média, taxa de erro por mensagem e projeção semanal de custo estimado.
 
 O resumo aceita de 100 a 1.000 usuários semanais. Nenhum endpoint de observabilidade retorna o conteúdo das mensagens ou dados pessoais.
+
+### SCRUM-1955 — primeira etapa de observabilidade do chat
+
+Cada mensagem acumula as estimativas dos agentes dentro de um contexto próprio,
+inclusive quando o trabalho passa para threads AnyIO/LangGraph. O custo médio
+divide esse total pelo número de mensagens finalizadas (sucessos, bloqueios,
+negações de acesso e erros), não pelo número de agentes. Chamadas de imagem e
+relatório fora do chat não entram nessa projeção. Os logs de conclusão contêm
+rota, status, duração e custo estimado, correlacionados pelo `request_id` já
+existente, sem conteúdo de conversa.
+
+Limites desta etapa:
+
+- Tokens e custos são aproximações por caracteres/4 e preços configurados;
+  não incluem integralmente loops de ferramentas, retries, embeddings ou imagens.
+  Não representam a fatura do provedor.
+- Sem amostra de mensagens, custo, latência e taxa de erro retornam `null`.
+- Aprovação do juiz e necessidade de validação humana são eventos separados;
+  não comprovam resolução operacional. Custo por resolução e valor/ROI ficam
+  `null` até existir uma confirmação operacional mensurável.
+- `fallback_rate` fica `null` quando não há reporte explícito do fallback.
+- Agentes no resumo incluem outras rotas de IA; o bloco de mensagens/projeções
+  cobre apenas o chat. Rejeições de autenticação e payload anteriores ao handler
+  não entram nessa amostra.
+- Os contadores residem no processo e reiniciam com ele. `/metrics` exige coleta
+  por Prometheus para histórico; resumo não agrega réplicas nem isola empresas.
+  É uma visão operacional interna, não um painel para clientes.
+
+Integração operacional: coletar `/metrics` na rede interna, montar painéis de
+latência, erros, custos estimados, juiz e validação humana no Grafana. Essa
+infraestrutura e a coleta persistente ainda não são provisionadas por esta mudança.
+O aplicativo mobile continua consumindo os endpoints de chat normalmente.
 
 ## Testes recomendados
 
