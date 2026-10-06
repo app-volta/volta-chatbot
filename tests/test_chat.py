@@ -1,5 +1,6 @@
 import asyncio
 import time
+from contextlib import nullcontext
 
 import anyio
 from fastapi import FastAPI
@@ -76,6 +77,12 @@ class FakeChatTelemetry:
         self.requests.append((args, kwargs))
 
     def record_judge(self, *_args, **_kwargs):
+        pass
+
+    def chat_request(self):
+        return nullcontext()
+
+    def record_human_intervention(self, _reason):
         pass
 
 
