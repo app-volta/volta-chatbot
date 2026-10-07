@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     a2a_timeout_seconds: int = 10
     ingestion_api_key: SecretStr | None = None
     jwt_key: SecretStr | None = Field(default=None, validation_alias="JWT_KEY")
+    observability_api_key: SecretStr | None = None
 
     # Estimativas configuráveis, para o painel acadêmico de custo/ROI.
     gemini_input_usd_per_million: float = 0.30

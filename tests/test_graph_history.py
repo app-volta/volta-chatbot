@@ -7,7 +7,7 @@ from app.ai.prompts import ORCHESTRATOR_PROMPT
 
 
 class FakeRag:
-    def retrieve_for_route(self, route, message, tenant_id=None):
+    def retrieve_for_route(self, route, message, tenant_id=None, user_id=None):
         return []
 
 
@@ -104,3 +104,51 @@ def test_graph_passes_rejected_verdict_to_orchestrator():
     assert "judge.reason" in ORCHESTRATOR_PROMPT
     assert "requires_human_validation=true" in ORCHESTRATOR_PROMPT
     assert "números, normas ou afirmações contestados" in ORCHESTRATOR_PROMPT
+
+
+class AlternatingTeam(FakeTeam):
+    def route(self, message):
+        if message == "primeiro turno":
+            return RouteDecision(route=RouteName.TRIAGE, rationale="Teste")
+        return RouteDecision(route=RouteName.DIRECT, rationale="Teste", direct_reply="Olá.")
+
+    def format_answer(self, route, specialist, judge, direct_reply=None):
+        self.received_verdict = judge
+        self.received_specialist = specialist
+        return CorporateAnswer(answer=direct_reply or "Resposta de teste")
+
+
+def test_graph_clears_specialist_judge_and_evidence_between_turns():
+    team = AlternatingTeam()
+    graph = build_volta_graph(team, FakeRag(), MemorySaver())
+    config = {"configurable": {"thread_id": "session-stale"}}
+
+    graph.invoke(
+        {
+            "messages": [{"role": "user", "content": "primeiro turno"}],
+            "request_id": "request-1",
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "session_id": "session-stale",
+            "input_text": "primeiro turno",
+        },
+        config=config,
+    )
+    result = graph.invoke(
+        {
+            "messages": [{"role": "user", "content": "segundo turno"}],
+            "request_id": "request-2",
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "session_id": "session-stale",
+            "input_text": "segundo turno",
+        },
+        config=config,
+    )
+
+    assert result["route"] == RouteName.DIRECT.value
+    assert result["specialist"] is None
+    assert result["judge"] is None
+    assert result["evidence"] == []
+    assert team.received_specialist is None
+    assert team.received_verdict is None

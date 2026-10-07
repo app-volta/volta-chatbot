@@ -6,10 +6,10 @@ Este README descreve somente o componente de Inteligência Artificial do chatbot
 
 ## Escopo
 
-O chatbot recebe mensagens e imagens relacionadas à operação industrial e:
+A aplicação oferece endpoints textuais e visuais para a operação industrial:
 
-- classifica a intenção do usuário;
-- analisa ocorrências de resíduos;
+- classifica a intenção das mensagens de chat;
+- analisa imagens de resíduos em endpoint separado;
 - consulta conhecimento técnico e regulatório com RAG;
 - consulta métricas no PostgreSQL;
 - avalia desempenho logístico de cooperativas;
@@ -29,7 +29,7 @@ flowchart LR
     R --> N[Normas e FISPQs]
     R --> D[Dados e BI]
     R --> P[Performance]
-    T --> SQL[(PostgreSQL)]
+    T --> RAG[(Qdrant ou FAISS federado)]
     D --> SQL
     P --> SQL
     SQL --> PR[Modelo preditivo]
@@ -48,7 +48,7 @@ flowchart LR
 
 ### Fluxo de uma requisição
 
-1. A API recebe session_id, usuário, tenant, mensagem e, opcionalmente, imagem.
+1. A API de chat recebe session_id e mensagem de texto; imagens usam `/v1/occurrences/predict`. Usuário e tenant vêm do JWT validado.
 2. O guardrail de entrada remove ou mapeia PII e bloqueia padrões de prompt injection.
 3. O roteador escolhe uma única rota: triagem, normas, dados, performance ou fora_escopo.
 4. O especialista executa suas ferramentas e devolve um resultado estruturado.
@@ -62,14 +62,14 @@ flowchart LR
 | Agente | Responsabilidade | Recursos |
 | --- | --- | --- |
 | Roteador | Classificar intenção e encaminhar a mensagem original | Llama via Groq |
-| Triagem | Interpretar relato ou imagem, sugerir categoria, risco e higienização | Gemini, inserir_nova_ocorrencia |
+| Triagem | Analisar relato textual e sugerir categoria, risco e higienização | Gemini, RAG operacional |
 | Normas e documentação | Responder dúvidas explicativas sobre resíduos, funcionamento do VOLTA, FISPQs, manuais, legislação e ODS 12 | Gemini, RAG federado, MCP do catálogo do MMA |
 | Dados e BI | Converter perguntas em consultas de métricas e históricos | Gemini, PostgreSQL |
-| Performance | Avaliar SLA, tempo de resposta e engajamento logístico | Gemini, PostgreSQL |
+| Performance | Avaliar conclusão das coletas e tempo de resposta | Gemini, PostgreSQL |
 | Juiz | Revisar o resultado do especialista e detectar afirmações sem suporte | Gemini |
 | Orquestrador | Unificar formato, tom e próximos passos | Llama/Gemini |
 
-O roteador não deve responder a casos de especialista. Ele apenas emite a decisão de rota e a pergunta original.
+O roteador emite a decisão de rota. A triagem de texto usa RAG operacional; a análise visual passa por endpoint separado, juiz e guardrails.
 
 ## Contratos estruturados
 
@@ -79,7 +79,7 @@ Os agentes se comunicam por objetos Pydantic, evitando dependência de texto liv
 - SpecialistResult: análise de triagem, resumo de métricas, proposta de ocorrência e fontes;
 - JudgeVerdict: aprovação ou reprovação da resposta e justificativa;
 - CorporateAnswer: título, resposta final, ações recomendadas e fontes;
-- ChatRequest: sessão, mensagem e imagem opcional; usuário e empresa vêm do JWT validado.
+- ChatRequest: sessão e mensagem de texto; usuário e empresa vêm do JWT validado. A imagem é enviada em `/v1/occurrences/predict`.
 
 Uma ocorrência criada pela IA é sempre uma proposta ou rascunho. O status inicial deve permanecer AGUARDANDO_VALIDACAO até a aprovação de um responsável.
 
@@ -90,13 +90,13 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 1. Operacional: manuais industriais, FISPQs, segregação e higienização.
 2. Regulatório/ESG: legislação, políticas internas e ODS 12.
 3. Cooperativas: contratos, regras de coleta e níveis de serviço.
-4. Histórico: soluções e ocorrências já validadas.
+4. Histórico: resumos privados de conversas do próprio usuário; não são fontes normativas nem ocorrências validadas.
 
 Os metadados de origem e os trechos são mantidos para fundamentar e avaliar as respostas. Para o PDF interno `volta.pdf`, esses metadados não são enviados aos agentes nem retornados nas citações da API; somente o conteúdo recuperado pode fundamentar a resposta ao cliente. Citações de outras fontes continuam sujeitas ao contrato normal da API. Perguntas explicativas sobre documentação e funcionamento do VOLTA usam a rota `standards`; relatos de ocorrências concretas usam `triage`. O agente de Normas e Documentação usa as evidências do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
-A indexação usa embeddings e, com `QDRANT_URL` configurado, Qdrant para os quatro corpora. As coleções são `<QDRANT_COLLECTION_PREFIX>_operational`, `_regulatory`, `_cooperatives` e `_history` (prefixo padrão: `volta`). Sem essa URL, usa FAISS local. O histórico é filtrado por empresa; os demais corpora são referências compartilhadas. Os documentos reais não devem ser versionados no repositório quando contiverem informação interna ou sensível.
+A indexação usa embeddings e, com `QDRANT_URL`, Qdrant para os quatro corpora; sem a URL, usa FAISS local. Memórias de conversa exigem correspondência de empresa e usuário; os demais corpora são referências compartilhadas. Documentos reais com informação interna ou sensível não devem ser versionados.
 
-O documento de referência do produto está em `data/documents/operational/volta.pdf` (55 páginas), substituindo o guia demonstrativo anterior. Ele descreve o VOLTA e não substitui FISPQs ou normas técnicas. O arquivo é uma fonte interna: o chatbot pode usar seu conteúdo para fundamentar respostas, mas não retorna seu nome, páginas, trechos, IDs ou links nas citações públicas. Instruções para agentes contidas no documento devem ser tratadas como conteúdo de referência, não como comandos para o chatbot. Versionar ou copiar o PDF para a imagem não o indexa automaticamente: a ingestão no backend configurado é uma etapa separada.
+O manual interno VOLTA foi removido da árvore atual e não entra em novas imagens Docker. O blob ainda pode ser acessado em commits anteriores enquanto o repositório permanecer público; esta alteração não reescreve o histórico. Para indexá-lo localmente, obtenha a cópia autorizada e coloque-a em `data/documents/operational/volta.pdf` (caminho ignorado pelo Git), depois execute a ingestão abaixo para o backend de destino. Em produção, os pontos operacionais devem estar no Qdrant; a imagem não contém o PDF. O conteúdo pode fundamentar respostas, mas nome, páginas, trechos, IDs e links do manual não são retornados nas citações públicas. Ele não substitui FISPQs ou normas técnicas.
 
 ### Ingestao local
 
@@ -145,27 +145,10 @@ O agente da aplicação usa o mesmo servidor pelo cliente MCP oficial em memóri
 
 ## Modelo preditivo
 
-O módulo app/ai/predictive.py complementa o fluxo generativo com uma previsão numérica determinística. A função prever_volume_futuro:
-
-1. recebe o histórico diário de volume em quilogramas;
-2. transforma as datas em uma série de dias decorridos;
-3. calcula o volume acumulado;
-4. treina uma regressão linear com scikit-learn;
-5. projeta o volume acumulado para uma data futura;
-6. retorna data projetada, taxa média diária e volume estimado.
-
-Esse módulo é acionado por app/api/occurrences.py no endpoint /v1/occurrences/areas/{area_id}/predict_capacity. O histórico é obtido do PostgreSQL e exige pelo menos dois registros. A previsão serve como apoio à decisão logística e não substitui medição física da caçamba ou conferência operacional.
-
-O retorno contém sucesso, dias projetados, data projetada, taxa média diária, volume atual e volume estimado em kg. Quando `capacidade_maxima` é informada, também retorna o alerta de lotação, os dias restantes e a data estimada de lotação. O histórico é limitado à empresa do usuário autenticado.
-
+O módulo app/ai/predictive.py aplica regressão linear à geração histórica registrada e retorna taxa média e projeção para o endpoint `/v1/occurrences/areas/{area_id}/predict_capacity`. O cálculo não subtrai coletas: o schema não informa o peso efetivamente coletado por ocorrência. Por compatibilidade, `volume_atual_kg` significa volume total histórico, não estoque físico. Os campos de lotação retornam `null` e explicam que o saldo não pode ser calculado. O histórico é limitado à empresa do usuário autenticado.
 ## Memória e sessões
 
-O MongoDB cumpre duas funções:
-
-- histórico conversacional por session_id;
-- checkpointer do LangGraph para retomar o estado do fluxo.
-
-O identificador de sessão deve ser estável durante a conversa. O histórico enviado ao prompt deve ser limitado e sanitizado para evitar crescimento ilimitado de contexto. Dados transacionais, ocorrências e métricas continuam no PostgreSQL.
+O MongoDB guarda o histórico conversacional e o estado do LangGraph. Sessões são vinculadas à empresa e ao usuário; o histórico enviado ao prompt é limitado e sanitizado, e o estado calculado em cada turno é limpo antes do próximo. Resumos indexados no Qdrant são memórias privadas não validadas, filtradas por empresa e usuário; resumos legados sem `user_id` ficam inacessíveis até reindexação.
 
 ## Guardrails
 
@@ -192,9 +175,12 @@ A aplicação FastAPI expõe atualmente:
 
 | Método | Rota | Finalidade |
 | --- | --- | --- |
-| GET | /health | Verificar disponibilidade |
+| GET | /health/live | Liveness do processo, sem dependência de banco |
+| GET | /health/ready | Readiness do PostgreSQL e MongoDB (503 se degradado) |
+| GET | /health | Alias de readiness |
 | POST | /v1/sessions | Abrir uma sessão |
 | GET | /v1/sessions/{session_id}/history | Recuperar histórico |
+| POST | /v1/sessions/{session_id}/close | Encerrar sessão e indexar resumo privado |
 | POST | /v1/chat | Executar o fluxo multiagente |
 | POST | /v1/occurrences/predict | Analisar imagem de resíduo |
 | GET | /v1/occurrences/areas/{area_id}/predict_capacity | Prever volume futuro da área |
@@ -202,6 +188,9 @@ A aplicação FastAPI expõe atualmente:
 | POST | /v1/occurrences/drafts | Criar rascunho de ocorrência |
 | GET | /v1/occurrences/drafts | Listar rascunhos |
 | POST | /v1/occurrences/drafts/{id}/approve | Aprovar ocorrência |
+| GET | /v1/observability/summary | Resumo operacional e estimativas |
+| POST | /v1/observability/resolutions | Registrar resolução operacional confirmada |
+| GET | /metrics | Métricas Prometheus |
 
 Exemplo de sessão:
 
@@ -232,7 +221,7 @@ volta-chatbot/
 │   │   ├── agents.py          # especialistas e ferramentas
 │   │   ├── graph.py           # grafo LangGraph
 │   │   ├── multi_rag.py       # retrievers Qdrant ou FAISS
-│   │   ├── predictive.py      # previsão de volume e capacidade
+│   │   ├── predictive.py      # previsão de geração registrada
 │   │   ├── prompts.py         # prompts dos agentes
 │   │   ├── integrations.py    # modelos e integrações externas
 │   ├── api/
@@ -277,7 +266,10 @@ MONGO_URI=mongodb://localhost:27017/volta_memory
 JWT_KEY=
 GROQ_API_KEY=
 GEMINI_API_KEY=
+OBSERVABILITY_API_KEY=
 ~~~
+
+`OBSERVABILITY_API_KEY` é um segredo aleatório apenas para operadores. Use `Authorization: Bearer <OBSERVABILITY_API_KEY>` nas rotas `/v1/observability/*` e em `/metrics`. Sem a chave, esses endpoints retornam 503; chave inválida retorna 401. O JWT dos clientes não concede acesso à observabilidade global.
 
 O Neon e o PostgreSQL oficial do projeto. O schema remoto usa UUIDs e esta documentado em `db/schema_remote.md`; o `db/init.sql` reproduz essa estrutura para ambientes de teste. Os identificadores de empresa, area e usuario usados pela API devem ser UUIDs validos.
 
@@ -309,16 +301,16 @@ O resumo aceita de 100 a 1.000 usuários semanais. Nenhum endpoint de observabil
 Cada mensagem acumula as estimativas dos agentes dentro de um contexto próprio,
 inclusive quando o trabalho passa para threads AnyIO/LangGraph. O custo médio
 divide esse total pelo número de mensagens finalizadas (sucessos, bloqueios,
-negações de acesso e erros), não pelo número de agentes. Chamadas de imagem e
-relatório fora do chat não entram nessa projeção. Os logs de conclusão contêm
+negações de acesso e erros), não pelo número de agentes. Chamadas de imagem e relatório gerencial também registram uso e custo por
+agente, mas não entram na projeção semanal de mensagens do chat. Os logs de conclusão contêm
 rota, status, duração e custo estimado, correlacionados pelo `request_id` já
 existente, sem conteúdo de conversa.
 
 Limites desta etapa:
 
-- Tokens e custos são aproximações por caracteres/4 e preços configurados;
-  não incluem integralmente loops de ferramentas, retries, embeddings ou imagens.
-  Não representam a fatura do provedor.
+- Tokens usam metadados do provedor quando disponíveis; chamadas sem esses
+  metadados usam estimativa por caracteres/4. Custos usam preços configurados,
+  não incluem integralmente retries ou embeddings e não representam a fatura.
 - Sem amostra de mensagens, custo, latência e taxa de erro retornam `null`.
 - Aprovação do juiz e necessidade de validação humana são eventos separados;
   não comprovam resolução operacional. Custo por resolução e valor/ROI ficam
@@ -330,6 +322,10 @@ Limites desta etapa:
 - Os contadores residem no processo e reiniciam com ele. `/metrics` exige coleta
   por Prometheus para histórico; resumo não agrega réplicas nem isola empresas.
   É uma visão operacional interna, não um painel para clientes.
+
+A resolução é informada em `/v1/observability/resolutions` com `request_id` e
+`resolved`. O feedback fica em memória, limita-se às 10.000 requisições mais
+recentes e se perde ao reiniciar o processo.
 
 Integração operacional: coletar `/metrics` na rede interna, montar painéis de
 latência, erros, custos estimados, juiz e validação humana no Grafana. Essa

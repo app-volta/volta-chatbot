@@ -12,7 +12,12 @@ from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
 from psycopg.rows import dict_row
+from psycopg.errors import UniqueViolation
 from psycopg_pool import ConnectionPool
+
+
+class DuplicateAnalysisError(Exception):
+    """Raised when a signed visual analysis has already created a report."""
 from pymongo import ASCENDING, DESCENDING, MongoClient
 from pymongo.collection import Collection
 
@@ -47,7 +52,7 @@ class PostgresRepository:
         )
         
     def get_incident_history_by_area(self, area_id: UUID | str, tenant_id: str | None = None) -> list[dict]:
-        """Busca o historico de peso de lixo de uma cacamba especifica para treinar a IA."""
+        """Busca ocorrências registradas da área sem inferir saldo após coletas."""
         company_id = _company_id_from_tenant(tenant_id)
         if company_id is None:
             return []
@@ -55,19 +60,25 @@ class PostgresRepository:
             cursor.execute(
                 """
                 SELECT
-                    DATE(registered_at) AS data_registro,
-                    SUM(estimated_quantity) AS peso_total_dia
-                FROM incident
-                WHERE area_id = %s
-                  AND estimated_quantity IS NOT NULL
-                  AND (%s::uuid IS NULL OR company_id = %s)
-                GROUP BY DATE(registered_at)
+                    DATE(i.registered_at) AS data_registro,
+                    SUM(i.estimated_quantity) AS peso_total_dia
+                FROM incident i
+                WHERE i.area_id = %s
+                  AND i.company_id = %s
+                  AND UPPER(i.status) = 'REGISTRADA'
+                  AND i.estimated_quantity IS NOT NULL
+                GROUP BY DATE(i.registered_at)
                 ORDER BY data_registro ASC;
                 """,
-                (area_id, company_id, company_id)
+                (area_id, company_id)
             )
-            # Formata a data para string e o peso para float para facilitar o trabalho do Pandas
-            return [{"data_registro": str(row["data_registro"]), "peso_total_dia": float(row["peso_total_dia"])} for row in cursor.fetchall()]    
+            return [
+                {
+                    "data_registro": str(row["data_registro"]),
+                    "peso_total_dia": float(row["peso_total_dia"]),
+                }
+                for row in cursor.fetchall()
+            ]
 
     def close(self) -> None:
         """Encerra a pool (Chamado no teardown do lifespan)."""
@@ -135,31 +146,36 @@ class PostgresRepository:
                     "user_id": user_id,
                     "description": description,
                     "contamination": ai_data.get("ai_contamination_level", "N/A"),
-                    "volume": ai_data.get("estimated_quantity_kg", 0.0),
+                    "volume": ai_data.get("estimated_quantity_kg"),
                     "priority": clean_priority,
                 }
             )
             incident_id = cursor.fetchone()["id"]
 
-            # 2. Salva o laudo gerado pelo Gemini na tabela ai_report
-            cursor.execute(
-                """
-                INSERT INTO ai_report (
-                    incident_id, detected_waste_type, ai_contamination_level, 
+            # 2. O endpoint valida o selo de proveniência antes de persistir o laudo.
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO ai_report (
+                    id, incident_id, detected_waste_type, ai_contamination_level,
                     recommendations, report_text, generated_at
-                ) VALUES (
-                    %(incident_id)s, %(detected)s, %(contamination)s, 
-                    %(recs)s, %(report)s, CURRENT_TIMESTAMP
-                );
-                """,
-                {
+                    ) VALUES (
+                    %(analysis_id)s, %(incident_id)s, %(detected)s, %(contamination)s,
+                    %(recs)s, %(report)s, %(generated_at)s
+                    );
+                    """,
+                    {
+                    "analysis_id": ai_data["analysis_id"],
                     "incident_id": incident_id,
                     "detected": ai_data.get("detected_waste_type", ""),
                     "contamination": ai_data.get("ai_contamination_level", ""),
                     "recs": ai_data.get("recommendations", ""),
                     "report": ai_data.get("report_text", ""),
-                }
-            )
+                    "generated_at": ai_data["generated_at"].astimezone(UTC).replace(tzinfo=None),
+                    }
+                )
+            except UniqueViolation as exc:
+                raise DuplicateAnalysisError("Visual analysis already used.") from exc
             return incident_id
 
     def approve_occurrence_draft(self, draft_id: UUID | str, tenant_id: str, approver_id: str) -> UUID | str:
@@ -264,13 +280,13 @@ class PostgresRepository:
                 SELECT c.name AS cooperative_name,
                        COUNT(*) FILTER (WHERE col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE')) AS coletas_concluidas,
                        ROUND(AVG(EXTRACT(EPOCH FROM (col.scheduled_at - col.requested_at)))::numeric / 3600, 2) AS tempo_medio_resposta_horas,
-                       ROUND(AVG(CASE WHEN col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE') THEN 1 ELSE 0 END)::numeric * 100, 2) AS cumprimento_sla_percentual
+                       ROUND(AVG(CASE WHEN col.current_status IN ('COMPLETED', 'COLLECTED', 'DONE') THEN 1 ELSE 0 END)::numeric * 100, 2) AS taxa_conclusao_percentual
                 FROM collection col
                 JOIN cooperative c ON c.id = col.cooperative_id
                 JOIN incident i ON i.id = col.incident_id
                 WHERE (%s::uuid IS NULL OR i.company_id = %s)
                 GROUP BY c.name
-                ORDER BY cumprimento_sla_percentual DESC, tempo_medio_resposta_horas ASC
+                ORDER BY taxa_conclusao_percentual DESC, tempo_medio_resposta_horas ASC
                 """,
                 (company_id, company_id),
             )

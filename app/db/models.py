@@ -2,7 +2,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal
 from uuid import UUID
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 # ==============================================================================
 # ENUMS
@@ -22,12 +22,19 @@ class SourceCitation(BaseModel):
     source_id: str
     title: str
     corpus: Literal["operational", "regulatory", "cooperatives", "history"]
-    internal_document: bool = Field(default=False, exclude=True)
+    internal_document: bool = False
     location: str | None = None
     url: str | None = None
     score: float | None = None
     excerpt: str = ""
     retrieved_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def preserve_legacy_internal_classification(self):
+        # Older checkpoints omitted the marker; recover the known private source.
+        if self.corpus == "operational" and self.title.strip().casefold() in {"volta", "volta.pdf"}:
+            self.internal_document = True
+        return self
 
 class RouteDecision(BaseModel):
     route: RouteName
@@ -81,7 +88,8 @@ class AnaliseResiduoIA(BaseModel):
         description="Nível de contaminação estimado: 'BAIXO', 'MEDIO' ou 'ALTO'."
     )
     estimated_quantity_kg: float | None = Field(
-        None, 
+        None,
+        ge=0,
         description="Estimativa visual de peso em kg. Se não for possível deduzir pela imagem, retorne null."
     )
     recommendations: str = Field(
@@ -93,6 +101,18 @@ class AnaliseResiduoIA(BaseModel):
     mobile_summary: str = Field(
         description="Resumo ultra curto de no máximo 20 palavras focado no mobile para caber no card verde."
     )
+    requires_human_validation: bool = True
+    judge: JudgeVerdict | None = None
+    analysis_id: UUID | None = None
+    generated_at: datetime | None = None
+    provenance_token: str | None = Field(default=None, repr=False)
+
+    @field_validator("mobile_summary")
+    @classmethod
+    def limit_visual_mobile_summary_words(cls, value: str) -> str:
+        if len(value.split()) > 20:
+            raise ValueError("mobile_summary deve ter no máximo 20 palavras.")
+        return value
 
 # ==============================================================================
 # REQUESTS & RESPONSES (ENDPOINTS)

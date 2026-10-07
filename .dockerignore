@@ -25,3 +25,4 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 data/faiss
+data/documents/operational/volta.pdf

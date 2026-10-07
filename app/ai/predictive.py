@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from math import ceil, isfinite
+from math import isfinite
 
 import pandas as pd
 from sklearn.linear_model import LinearRegression
@@ -14,16 +14,17 @@ def prever_volume_futuro(
     dias_futuros: int = 7,
     capacidade_maxima: float | None = None,
 ) -> dict:
-    """Projeta o volume acumulado e, opcionalmente, a data de lotacao.
+    """Projeta a geração acumulada das ocorrências registradas.
 
-    ``dados_historicos`` deve conter ``data_registro`` e ``peso_total_dia``.
-    A previsao e um apoio ao BI; nao substitui a validacao operacional.
+    ``dados_historicos`` deve conter ``data_registro`` e ``peso_total_dia`` e já
+    estar filtrado pela persistência. O saldo é documental; não mede fisicamente
+    a caçamba e sempre exige conferência operacional.
     """
     if len(dados_historicos) < 2:
         return {"alerta": False, "mensagem": "Dados insuficientes para realizar a previsao (minimo de 2 registros)."}
     if dias_futuros < 0:
         raise ValueError("dias_futuros deve ser maior ou igual a zero.")
-    if capacidade_maxima is not None and capacidade_maxima <= 0:
+    if capacidade_maxima is not None and (not isfinite(capacidade_maxima) or capacidade_maxima <= 0):
         raise ValueError("capacidade_maxima deve ser maior que zero.")
 
     df = pd.DataFrame(dados_historicos)
@@ -52,28 +53,30 @@ def prever_volume_futuro(
     dia_alvo = dias_ultimo_registro + dias_futuros
     volume_previsto = max(0.0, float(modelo.predict(pd.DataFrame({"dias_passados": [dia_alvo]}))[0]))
     taxa_diaria = float(modelo.coef_[0])
+    volume_historico = float(df["peso_acumulado"].iloc[-1])
     resultado = {
         "sucesso": True,
         "dias_projetados": dias_futuros,
         "data_projetada": (data_atual + timedelta(days=dias_futuros)).strftime("%Y-%m-%d"),
         "taxa_geracao_diaria_kg": round(taxa_diaria, 2),
-        "volume_atual_kg": round(float(df["peso_acumulado"].iloc[-1]), 2),
+        # Compatibilidade: este campo representa geração histórica, não estoque físico.
+        "volume_atual_kg": round(volume_historico, 2),
+        "volume_total_registrado_kg": round(volume_historico, 2),
         "volume_estimado_kg": round(volume_previsto, 2),
+        "base_calculo": "ocorrencias_registradas_historicas",
+        "volume_atual_significado": "geracao historica; nao representa estoque fisico",
+        "estimativa_nao_e_medicao_fisica": True,
+        "requires_human_validation": True,
     }
 
     if capacidade_maxima is not None:
-        volume_atual = float(df["peso_acumulado"].iloc[-1])
-        dias_ate_lotacao = None
-        data_estimada_lotacao = None
-        if volume_atual < capacidade_maxima and taxa_diaria > 0 and isfinite(taxa_diaria):
-            dias_ate_lotacao = ceil((capacidade_maxima - volume_atual) / taxa_diaria - 1e-9)
-            data_estimada_lotacao = (data_atual + timedelta(days=dias_ate_lotacao)).strftime("%Y-%m-%d")
         resultado.update(
             {
                 "capacidade_maxima_kg": round(capacidade_maxima, 2),
-                "capacidade_atingida_no_horizonte": volume_previsto >= capacidade_maxima,
-                "dias_ate_lotacao": dias_ate_lotacao,
-                "data_estimada_lotacao": data_estimada_lotacao,
+                "capacidade_atingida_no_horizonte": None,
+                "dias_ate_lotacao": None,
+                "data_estimada_lotacao": None,
+                "motivo_capacidade_indisponivel": "O peso coletado por ocorrência não está disponível para calcular o estoque restante.",
             }
         )
     return resultado

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -108,7 +109,7 @@ def test_performance_query_uses_remote_collection_schema():
             "cooperative_name": "Cooperativa Recicla SP",
             "coletas_concluidas": 2,
             "tempo_medio_resposta_horas": 4.5,
-            "cumprimento_sla_percentual": 100.0,
+            "taxa_conclusao_percentual": 100.0,
         }]
     )
 
@@ -117,6 +118,8 @@ def test_performance_query_uses_remote_collection_schema():
 
     assert rows[0]["cooperative_name"] == "Cooperativa Recicla SP"
     assert "FROM collection" in repository.pool.cursor.sql
+    assert "taxa_conclusao_percentual" in repository.pool.cursor.sql
+    assert "cumprimento_sla_percentual" not in repository.pool.cursor.sql
     assert repository.pool.cursor.params == (UUID(tenant_id), UUID(tenant_id))
 
 
@@ -143,15 +146,19 @@ def test_company_data_queries_fail_closed_without_tenant():
 def test_incident_history_applies_company_scope():
     repository = PostgresRepository()
     repository.pool = FakePool(
-        [{"data_registro": "2026-08-01", "peso_total_dia": 10.0}]
+        [{
+            "data_registro": "2026-08-01",
+            "peso_total_dia": 10.0,
+        }]
     )
 
     tenant_id = "550e8400-e29b-41d4-a716-446655440000"
     rows = repository.get_incident_history_by_area(4, tenant_id)
 
     assert rows[0]["peso_total_dia"] == 10.0
-    assert "company_id = %s" in repository.pool.cursor.sql
-    assert repository.pool.cursor.params == (4, UUID(tenant_id), UUID(tenant_id))
+    assert "UPPER(i.status) = 'REGISTRADA'" in repository.pool.cursor.sql
+    assert "collection_status" not in repository.pool.cursor.sql
+    assert repository.pool.cursor.params == (4, UUID(tenant_id))
 
 
 def test_draft_query_applies_company_scope():
@@ -284,6 +291,30 @@ def test_occurrence_draft_rejects_area_from_another_company():
             ai_data={"report_text": "Laudo"},
         )
     assert "FROM area WHERE id = %s AND company_id = %s" in repository.pool.cursor.sql
+
+
+def test_visual_analysis_id_is_persisted_as_unique_ai_report_id():
+    repository = PostgresRepository()
+    repository.pool = FakePool([{"id": UUID("550e8400-e29b-41d4-a716-446655440004")}])
+    analysis_id = UUID("550e8400-e29b-41d4-a716-446655440005")
+    generated_at = datetime(2026, 10, 6, 12, tzinfo=UTC)
+
+    repository.create_occurrence_draft(
+        company_id=UUID("550e8400-e29b-41d4-a716-446655440001"),
+        area_id=UUID("550e8400-e29b-41d4-a716-446655440002"),
+        user_id=UUID("550e8400-e29b-41d4-a716-446655440003"),
+        employee_description="Papelão no setor B",
+        priority="MEDIA",
+        ai_data={"analysis_id": analysis_id, "generated_at": generated_at, "report_text": "Laudo"},
+    )
+
+    incident_params = repository.pool.cursor.executions[1][1]
+    sql, params = repository.pool.cursor.executions[-1]
+    assert incident_params["volume"] is None
+    assert "INSERT INTO ai_report" in sql
+    assert "%(analysis_id)s" in sql
+    assert params["analysis_id"] == analysis_id
+    assert params["generated_at"] == generated_at.replace(tzinfo=None)
 
 
 def test_mongodb_srv_connection_does_not_force_direct_connection(monkeypatch):

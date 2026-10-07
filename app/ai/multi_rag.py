@@ -287,21 +287,38 @@ class FederatedRag:
                         ))
         return self.ingest_documents(corpus, documents)
 
-    def retrieve(self, corpus: Corpus, query: str, k: int = 4, tenant_id: str | None = None) -> list[SourceCitation]:
+    def retrieve(
+        self,
+        corpus: Corpus,
+        query: str,
+        k: int = 4,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[SourceCitation]:
         if not query.strip():
             return []
+        if corpus == "history" and (not tenant_id or not user_id):
+            return []
         if self._qdrant is not None:
-            return self._retrieve_qdrant(corpus, query, k, tenant_id)
+            return self._retrieve_qdrant(corpus, query, k, tenant_id, user_id)
         store = self._load(corpus)
         if not store:
             return []
-        results = store.similarity_search_with_relevance_scores(query, k=max(k * 4, k) if tenant_id else k)
+        metadata_filter = (
+            {"tenant_id": tenant_id, "user_id": user_id}
+            if corpus == "history"
+            else None
+        )
+        search_options = {"filter": metadata_filter} if metadata_filter is not None else {}
+        results = store.similarity_search_with_relevance_scores(query, k=k, **search_options)
         citations: list[SourceCitation] = []
         for document, score in results:
             if score < 0.35:
                 continue
             metadata = document.metadata
-            if tenant_id and corpus == "history" and metadata.get("tenant_id") != tenant_id:
+            if corpus == "history" and (
+                metadata.get("tenant_id") != tenant_id or metadata.get("user_id") != user_id
+            ):
                 continue
             citations.append(
                 SourceCitation(
@@ -320,15 +337,25 @@ class FederatedRag:
                 break
         return citations
 
-    def _retrieve_qdrant(self, corpus: Corpus, query: str, k: int, tenant_id: str | None = None) -> list[SourceCitation]:
+    def _retrieve_qdrant(
+        self,
+        corpus: Corpus,
+        query: str,
+        k: int,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[SourceCitation]:
         collection_name = self._collection_name(corpus)
         if not self._qdrant.collection_exists(collection_name):
             return []
         vector = self.embeddings.embed_query(query)
         query_filter = None
-        if tenant_id and corpus == "history":
+        if corpus == "history":
             query_filter = Filter(
-                must=[FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id))]
+                must=[
+                    FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id)),
+                    FieldCondition(key="metadata.user_id", match=MatchValue(value=user_id)),
+                ]
             )
         results = self._qdrant.query_points(
             collection_name=collection_name,
@@ -357,18 +384,26 @@ class FederatedRag:
             )
         return citations
 
-    def retrieve_for_route(self, route: str, query: str, tenant_id: str | None = None) -> list[SourceCitation]:
+    def retrieve_for_route(
+        self,
+        route: str,
+        query: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[SourceCitation]:
         mapping: dict[str, tuple[Corpus, ...]] = {
             "triage": ("operational", "history"),
-            "standards": ("operational", "regulatory", "history"),
-            "performance": ("cooperatives", "history"),
+            "standards": ("operational", "regulatory"),
+            "performance": ("cooperatives",),
             # O agente de Dados usa RAG apenas para contexto e definições;
             # números e KPIs continuam vindo exclusivamente do PostgreSQL.
-            "data": ("regulatory", "history"),
+            "data": ("regulatory",),
         }
         citations: list[SourceCitation] = []
         for corpus in mapping.get(route, ()):
-            citations.extend(self.retrieve(corpus, query, tenant_id=tenant_id))
+            citations.extend(
+                self.retrieve(corpus, query, tenant_id=tenant_id, user_id=user_id)
+            )
         return citations
 
     def ingest_external_url(self, corpus: Corpus, url: str, title: str) -> int:
