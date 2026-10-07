@@ -308,7 +308,9 @@ def test_visual_analysis_id_is_persisted_as_unique_ai_report_id():
         ai_data={"analysis_id": analysis_id, "generated_at": generated_at, "report_text": "Laudo"},
     )
 
+    incident_params = repository.pool.cursor.executions[1][1]
     sql, params = repository.pool.cursor.executions[-1]
+    assert incident_params["volume"] is None
     assert "INSERT INTO ai_report" in sql
     assert "%(analysis_id)s" in sql
     assert params["analysis_id"] == analysis_id

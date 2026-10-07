@@ -146,7 +146,7 @@ class PostgresRepository:
                     "user_id": user_id,
                     "description": description,
                     "contamination": ai_data.get("ai_contamination_level", "N/A"),
-                    "volume": ai_data.get("estimated_quantity_kg", 0.0),
+                    "volume": ai_data.get("estimated_quantity_kg"),
                     "priority": clean_priority,
                 }
             )
