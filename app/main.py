@@ -85,8 +85,14 @@ app.add_middleware(
 )
 
 
+@app.get("/health/live", tags=["System"])
+def liveness() -> dict:
+    return {"status": "alive"}
+
+
 @app.get("/health", tags=["System"])
-def health() -> dict:
+@app.get("/health/ready", tags=["System"])
+def health(response: Response) -> dict:
     try:
         postgres_ok = db_postgres.healthcheck()
         mongo_ok = db_mongo.healthcheck()
@@ -96,6 +102,8 @@ def health() -> dict:
             detail="Dependência de banco de dados indisponível.",
         ) from exc
 
+    if not postgres_ok or not mongo_ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {
         "status": "ok" if postgres_ok and mongo_ok else "degraded",
         "postgres": postgres_ok,
