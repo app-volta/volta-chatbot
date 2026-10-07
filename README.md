@@ -192,7 +192,9 @@ A aplicação FastAPI expõe atualmente:
 
 | Método | Rota | Finalidade |
 | --- | --- | --- |
-| GET | /health | Verificar disponibilidade |
+| GET | /health/live | Verificar se o processo está ativo |
+| GET | /health/ready | Verificar disponibilidade dos bancos (503 se degradado) |
+| GET | /health | Alias de readiness para compatibilidade |
 | POST | /v1/sessions | Abrir uma sessão |
 | GET | /v1/sessions/{session_id}/history | Recuperar histórico |
 | POST | /v1/chat | Executar o fluxo multiagente |
