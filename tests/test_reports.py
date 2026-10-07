@@ -27,15 +27,15 @@ class FakeTelemetry:
     def timer(self):
         return 0.0
 
-    def record_agent(self, agent, model, started, prompt, response, **kwargs):
-        self.response_text = response
+    def record_agent(self, agent, *args, **kwargs):
+        self.response_text = kwargs.get("response_text") or (args[4] if len(args) > 4 else None)
 
 
 class FakeStructuredModel:
     def __init__(self):
         self.prompt = None
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, **_kwargs):
         self.prompt = messages[0].content
         return AIManagementSummary(
             problema_analisado="Há registros recentes de descarte.",

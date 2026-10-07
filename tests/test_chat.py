@@ -91,9 +91,11 @@ class FakeChatGraph:
         self.delay = delay
         self.error = error
         self.config = None
+        self.input = None
 
-    def invoke(self, _input, *, config):
+    def invoke(self, graph_input, *, config):
         self.config = config
+        self.input = graph_input
         if self.error:
             raise self.error
         if self.delay:
@@ -141,6 +143,11 @@ def test_chat_offloads_sync_mongo_calls_and_limits_graph_steps():
         assert response.status_code == 200
         assert ticks >= 10
         assert graph.config["recursion_limit"] == 25
+        assert graph.input["evidence"] == []
+        assert graph.input["database_data"] == []
+        assert graph.input["specialist"] is None
+        assert graph.input["judge"] is None
+        assert graph.input["corporate_answer"] is None
 
     asyncio.run(run())
 
@@ -187,5 +194,24 @@ def test_chat_provider_timeout_is_reported_and_counted_as_error():
             response = await client.post("/v1/chat", json={"session_id": "s-1", "message": "oi"})
         assert response.status_code == 503
         assert telemetry.requests[-1][0][2] == "error"
+
+    asyncio.run(run())
+
+
+def test_response_validation_failure_is_counted_once_as_error(monkeypatch):
+    async def run():
+        telemetry = FakeChatTelemetry()
+        app = _chat_test_app(FakeSessions(), FakeChatGraph(), telemetry)
+
+        def invalid_response(**_kwargs):
+            raise ValueError("resposta inválida")
+
+        monkeypatch.setattr("app.api.chat.ChatResponse", invalid_response)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/v1/chat", json={"session_id": "s-1", "message": "oi"})
+
+        assert response.status_code == 503
+        assert len(telemetry.requests) == 1
+        assert telemetry.requests[0][0][2] == "error"
 
     asyncio.run(run())

@@ -75,7 +75,7 @@ def test_invalid_specialist_json_uses_structured_output_fallback(monkeypatch):
     expected = SpecialistResult(metrics_summary={"answer": "Resultado"})
 
     class FakeStructuredOutput:
-        def invoke(self, _prompt):
+        def invoke(self, _prompt, config=None):
             return expected
 
     team = _team()

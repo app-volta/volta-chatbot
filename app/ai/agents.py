@@ -22,6 +22,7 @@ from app.core.request_context import log_exception_without_details
 from app.core.config import Settings
 from app.ai.multi_rag import FederatedRag, serialize_citations
 from app.core.observability import Observability
+from app.core.model_usage import ModelUsage
 from app.db.storage import PostgresRepository
 from app.ai.prompts import (
     DATA_PROMPT,
@@ -254,20 +255,22 @@ class AgentTeam:
 
     def _invoke_controller(self, name: str, runnable: Any, model: str, payload: str) -> Any:
         started = self.telemetry.timer()
+        usage = ModelUsage(model)
         try:
-            parsed = runnable.invoke({"input": payload})
-            self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
+            parsed = runnable.invoke({"input": payload}, config={"callbacks": [usage]})
+            self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text=parsed.model_dump_json(), **usage.measurement())
             return parsed
         except Exception as exc:
-            self.telemetry.record_agent(name, model, started, payload, str(exc), failed=True)
+            self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text="", failed=True, **usage.measurement())
             raise RuntimeError(f"Falha controlada no controlador {name}.") from exc
 
     def _invoke_specialist(self, name: str, executor: Any, model: str, payload: str) -> SpecialistResult:
         started = self.telemetry.timer()
+        usage = ModelUsage(model)
         try:
             result = executor.invoke(
                 {"messages": [("user", payload)]},
-                config={"recursion_limit": SPECIALIST_RECURSION_LIMIT},
+                config={"recursion_limit": SPECIALIST_RECURSION_LIMIT, "callbacks": [usage]},
             )
             final_message = result["messages"][-1]
             content = final_message.content
@@ -280,15 +283,16 @@ class AgentTeam:
             except (ValueError, TypeError):
                 parsed = self._structured_specialist(SpecialistResult).invoke(
                     "Converta a resposta abaixo para SpecialistResult. Preserve apenas informações fornecidas; "
-                    "se campos não se aplicarem, use null. Resposta: " + str(content)
+                    "se campos não se aplicarem, use null. Resposta: " + str(content),
+                    config={"callbacks": [usage]},
                 )
 
-            self.telemetry.record_agent(name, model, started, payload, parsed.model_dump_json())
+            self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text=parsed.model_dump_json(), **usage.measurement())
             return parsed
         except Exception as exc:
             log_exception_without_details(logger, f"Specialist {name} failed", exc)
 
-            self.telemetry.record_agent(name, model, started, payload, str(exc), failed=True)
+            self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text="", failed=True, **usage.measurement())
             raise RuntimeError(f"Falha controlada no especialista {name}.") from exc
 
     def route(self, message: str) -> RouteDecision:
