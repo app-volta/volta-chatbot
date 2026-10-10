@@ -332,6 +332,69 @@ latência, erros, custos estimados, juiz e validação humana no Grafana. Essa
 infraestrutura e a coleta persistente ainda não são provisionadas por esta mudança.
 O aplicativo mobile continua consumindo os endpoints de chat normalmente.
 
+### SCRUM-1964 — rastreamento do chat no LangSmith
+
+O LangSmith complementa as métricas locais com a árvore de execução do grafo e
+das chamadas de modelos. A integração é opcional e vem desligada. Não muda o
+contrato do mobile nem cria um novo endpoint de gastos. O endpoint `summary`
+continua calculando as métricas locais; ele não consulta o LangSmith.
+
+Configuração de QA (variáveis no container do chatbot):
+
+~~~env
+VOLTA_LANGSMITH_ENABLED=true
+LANGSMITH_PROJECT=volta-chatbot-qa
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+~~~
+
+Cadastre `LANGSMITH_API_KEY` no Secret do Kubernetes consumido pelo chatbot,
+sem substituir as outras chaves existentes. A chave não deve ir ao Git, ao
+mobile ou ao chat. Se a chave exigir um workspace, configure também
+`LANGSMITH_WORKSPACE_ID`. Use o endpoint da região da conta LangSmith.
+
+Use `VOLTA_LANGSMITH_ENABLED`, não o interruptor global `LANGSMITH_TRACING`:
+o envio é explícito, limitado ao grafo do chat e usa um cliente com filtro de
+privacidade. O middleware desativa o rastreamento automático durante as
+requisições para evitar um segundo envio sem esse filtro.
+
+Antes de enviar cada criação/atualização de span, o filtro remove entradas,
+saídas, configuração serializada, eventos, tags, dados de runtime e detalhes
+de erros. Metadados ficam limitados à identificação da requisição, ambiente,
+modelo/provedor e contagens de tokens. Não são exportados histórico, PDF,
+identificadores de empresa/usuário ou `thread_id` da sessão do chatbot.
+Nomes de etapas conhecidos são mantidos; nomes desconhecidos viram o tipo do
+span. O `request_id` permite correlacionar a execução aos logs operacionais.
+
+Tokens são extraídos de `usage_metadata` das respostas dos modelos antes de
+remover o conteúdo. Quando faltam, o span recebe `usage_missing=true`; ausência
+não significa custo zero. O LangSmith estima o custo pelos preços dos modelos
+que reconhecer. Isso não inclui a conta AWS nem comprova resolução operacional
+ou qualidade da resposta. Métricas locais continuam com seus limites descritos
+acima; os limites didáticos de p95 de 8 s e erro de 5% não são um SLA do VOLTA.
+
+Envio ocorre em segundo plano e o cliente solicita o descarregamento do buffer
+no encerramento. A entrega é best effort: uma interrupção abrupta ou falha de
+rede pode perder traces; não é uma trilha de auditoria durável.
+Sem chave ou com falha na inicialização, a integração permanece desligada;
+indisponibilidade do observador não deve impedir o atendimento do chat.
+Imagem, relatório e resumo de encerramento de sessão não são instrumentados
+por esta etapa. Bloqueios anteriores ao grafo continuam nas métricas locais.
+
+Aceitação em QA após publicar a alteração: enviar uma mensagem sintética,
+conferir grafo e chamadas filhas no projeto `volta-chatbot-qa`, comparar tokens
+com o provedor e inspecionar também um erro e uma chamada de ferramenta.
+Confirmar ausência de conteúdo em todos os spans e verificar que o chat atende
+com a integração desligada ou com LangSmith indisponível. Essa aceitação real
+ainda precisa ser executada; criar o projeto/chave não ativa o serviço.
+
+Validação local da integração: `python -m pytest -q tests/test_langsmith_tracing.py
+tests/test_chat.py tests/test_model_usage.py tests/test_observability.py
+tests/test_config.py` passou com 30 testes em Python 3.14. Os testes novos usam
+modelo sintético e capturam as operações no limite de envio do SDK, sem chave
+real nem chamadas externas. Verificam privacidade, tokens, herança do callback
+nas chamadas filhas e compatibilidade com métricas locais. Não substituem a
+aceitação com LangGraph, bancos e provedores reais em QA.
+
 ## Testes recomendados
 
 O cliente e os testes devem cobrir, no mínimo:

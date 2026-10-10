@@ -26,6 +26,10 @@ def get_graph(request: Request):
     """Injeta o ecossistema multiagente (LangGraph)."""
     return request.app.state.graph
 
+
+def get_langsmith_client(request: Request):
+    return getattr(request.app.state, "langsmith_client", None)
+
 def get_rag(request: Request) -> FederatedRag:
     return request.app.state.rag
 
