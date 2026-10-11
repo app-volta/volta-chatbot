@@ -1,6 +1,8 @@
 from contextlib import asynccontextmanager
 import logging
 import uuid
+import anyio
+from langsmith import tracing_context
 from fastapi import Depends, FastAPI, status, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +19,7 @@ from app.ai.graph import build_volta_graph
 from app.db.storage import db_postgres, db_mongo
 from app.api import sessions, observability
 from app.core.request_context import RequestIdFilter, request_id_context
+from app.core.langsmith_tracing import create_tracing_client, flush_traces
 
 
 _handler = logging.StreamHandler()
@@ -55,12 +58,16 @@ async def lifespan(app: FastAPI):
     app.state.rag = rag
     app.state.team = team
     app.state.graph = graph
+    app.state.langsmith_client = create_tracing_client(settings)
 
-    yield
-
-    # 5. Encerramento seguro das pools de conexão
-    db_postgres.close()
-    db_mongo.close()
+    try:
+        yield
+    finally:
+        if app.state.langsmith_client is not None:
+            await anyio.to_thread.run_sync(flush_traces, app.state.langsmith_client)
+        # 5. Encerramento seguro das pools de conexão
+        db_postgres.close()
+        db_mongo.close()
 
 
 app = FastAPI(
@@ -76,7 +83,9 @@ async def attach_request_id(request, call_next):
     request_id = str(uuid.uuid4())
     token = request_id_context.set(request_id)
     try:
-        response = await call_next(request)
+        # Only the explicit, filtered chat callback may export traces.
+        with tracing_context(enabled=False):
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
     finally:

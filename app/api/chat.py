@@ -23,7 +23,9 @@ from app.db.storage import SessionRepository
 from app.core.observability import Observability
 
 # Função fictícia para ilustrar a injeção do Grafo (você pode colocar isso no storage.py ou num dependencies.py)
-from app.core.dependencies import get_sessions, get_telemetry, get_graph
+from app.core.dependencies import get_sessions, get_telemetry, get_graph, get_langsmith_client
+from app.core.config import get_settings
+from app.core.langsmith_tracing import chat_tracer, invoke_chat_graph
 from app.core.request_context import log_exception_without_details, request_id_context
 
 router = APIRouter()
@@ -71,11 +73,12 @@ async def chat(
     identity: RequestIdentity = Depends(get_current_identity),
     sessions: SessionRepository = Depends(get_sessions),
     telemetry: Observability = Depends(get_telemetry),
-    graph = Depends(get_graph)
+    graph = Depends(get_graph),
+    tracing_client = Depends(get_langsmith_client),
 ) -> ChatResponse:
     started = perf_counter()
     with telemetry.chat_request():
-        return await _process_chat(payload, identity, sessions, telemetry, graph, started)
+        return await _process_chat(payload, identity, sessions, telemetry, graph, started, tracing_client)
 
 
 async def _process_chat(
@@ -85,6 +88,7 @@ async def _process_chat(
     telemetry: Observability,
     graph,
     started: float,
+    tracing_client=None,
 ) -> ChatResponse:
     """
     Processa a requisição do usuário passando pela arquitetura Multiagente.
@@ -139,10 +143,18 @@ async def _process_chat(
         }
         
         config = {"configurable": {"thread_id": payload.session_id}, "recursion_limit": CHAT_GRAPH_RECURSION_LIMIT}
+        settings = get_settings()
+        tracer = chat_tracer(tracing_client, settings) if tracing_client is not None else None
+        if tracer is not None:
+            config.update({
+                "run_name": "volta_chat",
+                "callbacks": [tracer],
+                "metadata": {"request_id": str(request_id), "environment": settings.environment},
+            })
         
         # 5. Execução do Multiagente (O professor alerta: NÃO bloquear o event loop aqui!)
         result = await anyio.to_thread.run_sync(
-            lambda: graph.invoke(graph_input, config=config),
+            lambda: invoke_chat_graph(graph, graph_input, config, tracing_client, settings),
             abandon_on_cancel=False,
         )
         

@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     ingestion_api_key: SecretStr | None = None
     jwt_key: SecretStr | None = Field(default=None, validation_alias="JWT_KEY")
     observability_api_key: SecretStr | None = None
+    volta_langsmith_enabled: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str | None = None
+    langsmith_endpoint: HttpUrl = HttpUrl("https://api.smith.langchain.com")
+    langsmith_workspace_id: str | None = None
 
     # Estimativas configuráveis, para o painel acadêmico de custo/ROI.
     gemini_input_usd_per_million: float = 0.30

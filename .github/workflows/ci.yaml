@@ -15,8 +15,8 @@ jobs:
     uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@61413ee2cf023b74653753c090859a67b3e04b45
     secrets: inherit
 
-  build:
-    name: build
+  validate-test:
+    name: validate-test
     runs-on: ubuntu-latest
     needs: validate-pr
     steps:
@@ -36,4 +36,12 @@ jobs:
         run: python -c "from app.main import app"
 
       - name: Executar testes
-        run: python -m pytest -q
+        run: python -m pytest -q --junitxml=relatorio-pytest.xml
+
+      - name: Publicar relatório dos testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relatorio-validate-test
+          path: relatorio-pytest.xml
+          retention-days: 5
