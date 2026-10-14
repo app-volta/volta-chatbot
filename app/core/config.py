@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, HttpUrl, SecretStr
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     environment: Literal["qa", "prod"] = "qa"
     api_prefix: str = "/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
+
+    @field_validator("cors_origins")
+    @classmethod
+    def validate_cors_origins(cls, origins: list[str]) -> list[str]:
+        if "*" in origins:
+            raise ValueError("CORS_ORIGINS não pode conter '*' com credenciais habilitadas.")
+        return origins
 
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-2.5-flash"

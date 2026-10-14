@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -9,7 +10,7 @@ RUN groupadd --system app \
     && useradd --system --gid app --home-dir /app --no-create-home app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install --require-hashes -r requirements.txt
 
 COPY --chown=app:app app ./app
 COPY --chown=app:app db ./db

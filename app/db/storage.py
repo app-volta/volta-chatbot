@@ -14,12 +14,13 @@ from uuid import UUID, uuid4
 from psycopg.rows import dict_row
 from psycopg.errors import UniqueViolation
 from psycopg_pool import ConnectionPool
+from pymongo import ASCENDING, DESCENDING, MongoClient
+from pymongo.collection import Collection
 
 
 class DuplicateAnalysisError(Exception):
     """Raised when a signed visual analysis has already created a report."""
-from pymongo import ASCENDING, DESCENDING, MongoClient
-from pymongo.collection import Collection
+
 
 def _company_id_from_tenant(tenant_id: str | None) -> UUID | None:
     """Valida o tenant e preserva UUIDs usados pelo schema remoto."""

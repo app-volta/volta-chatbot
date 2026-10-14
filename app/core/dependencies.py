@@ -1,9 +1,8 @@
 from fastapi import Request
-from app.core.config import get_settings
-from app.core.observability import Observability
-from app.ai.graph import build_volta_graph
-from app.ai.multi_rag import FederatedRag
+
 from app.ai.agents import AgentTeam
+from app.ai.multi_rag import FederatedRag
+from app.core.observability import Observability
 
 # Importando as instâncias e tipagens do nosso novo repositório centralizado
 from app.db.storage import db_postgres, db_mongo, PostgresRepository, SessionRepository

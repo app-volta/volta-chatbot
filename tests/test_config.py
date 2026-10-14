@@ -26,3 +26,8 @@ def test_settings_accepts_deployment_environments(environment: str) -> None:
 def test_settings_rejects_legacy_environments(environment: str) -> None:
     with pytest.raises(ValidationError):
         Settings(_env_file=None, environment=environment)
+
+
+def test_settings_rejects_wildcard_cors_with_credentials_enabled() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, cors_origins=["*"])

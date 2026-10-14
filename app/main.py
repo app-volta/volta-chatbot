@@ -23,6 +23,7 @@ from app.core.langsmith_tracing import create_tracing_client, flush_traces
 
 
 _handler = logging.StreamHandler()
+logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
 _formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s")
 for _configured_handler in logging.getLogger().handlers:
@@ -34,6 +35,10 @@ for _configured_handler in logging.getLogger().handlers:
 async def lifespan(app: FastAPI):
     settings = get_settings()
 
+    if not settings.gemini_api_key:
+        logger.critical("Startup abortado: GEMINI_API_KEY é necessária para embeddings e RAG.")
+        raise RuntimeError("GEMINI_API_KEY é necessária para embeddings e RAG.")
+
     # 1. Abertura das conexões de banco de dados
     db_postgres.open(settings.postgres_url)
     db_mongo.open(settings.mongodb_url)
@@ -42,6 +47,7 @@ async def lifespan(app: FastAPI):
     # 2. Módulos de telemetria, RAG e equipe de agentes
     telemetry = Observability(settings)
     rag = FederatedRag(settings)
+    rag.log_knowledge_base_status()
     team = AgentTeam(settings, rag, db_postgres, telemetry)
 
     # 3. Checkpointer e Grafo do LangGraph
