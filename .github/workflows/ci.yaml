@@ -11,8 +11,7 @@ permissions:
 
 jobs:
   validate-pr:
-    # SHA do DevOps que permite promover develop para main.
-    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@61413ee2cf023b74653753c090859a67b3e04b45
+    uses: app-volta/volta-devops/.github/workflows/reusable-validate-pr.yaml@v1
     secrets: inherit
 
   validate-test:
@@ -30,7 +29,10 @@ jobs:
           cache: pip
 
       - name: Instalar dependências
-        run: pip install -r requirements.txt
+        run: pip install --require-hashes -r requirements.txt -r requirements-dev.txt
+
+      - name: Verificar estilo com Ruff
+        run: ruff check . --select E4,E7,E9,F
 
       - name: Verificar importação da aplicação
         run: python -c "from app.main import app"

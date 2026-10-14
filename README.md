@@ -94,7 +94,9 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 
 Os metadados de origem e os trechos são mantidos para fundamentar e avaliar as respostas. Para o PDF interno `volta.pdf`, esses metadados não são enviados aos agentes nem retornados nas citações da API; somente o conteúdo recuperado pode fundamentar a resposta ao cliente. Citações de outras fontes continuam sujeitas ao contrato normal da API. Perguntas explicativas sobre documentação e funcionamento do VOLTA usam a rota `standards`; relatos de ocorrências concretas usam `triage`. O agente de Normas e Documentação usa as evidências do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
-A indexação usa embeddings e, com `QDRANT_URL`, Qdrant para os quatro corpora; sem a URL, usa FAISS local. Memórias de conversa exigem correspondência de empresa e usuário; os demais corpora são referências compartilhadas. Documentos reais com informação interna ou sensível não devem ser versionados.
+A indexação usa Qdrant nos ambientes QA e produção; FAISS local é fallback para desenvolvimento. No início da aplicação, os corpora estáticos `operational`, `regulatory` e `cooperatives` são verificados: coleções/índices ausentes ou vazios geram avisos no log, sem registrar credenciais ou conteúdo. Coleções ausentes continuam retornando nenhuma fonte; o aviso torna essa condição visível, mas não substitui a conferência de ingestão no ambiente. Memórias de conversa exigem correspondência de empresa e usuário; os demais corpora são referências compartilhadas. Documentos reais com informação interna ou sensível não devem ser versionados.
+
+Em QA e produção, configure `QDRANT_URL` e, quando o cluster exigir autenticação, `QDRANT_API_KEY` nos secrets do ambiente. A ingestão usa `python -m scripts.ingest_rag --corpus <corpus> --directory <diretório>` e deve ser validada com recuperação de conteúdo após a carga. Não empacotamos FAISS nem o manual privado na imagem pública.
 
 O manual interno VOLTA foi removido da árvore atual e não entra em novas imagens Docker. O blob ainda pode ser acessado em commits anteriores enquanto o repositório permanecer público; esta alteração não reescreve o histórico. Para indexá-lo localmente, obtenha a cópia autorizada e coloque-a em `data/documents/operational/volta.pdf` (caminho ignorado pelo Git), depois execute a ingestão abaixo para o backend de destino. Em produção, os pontos operacionais devem estar no Qdrant; a imagem não contém o PDF. O conteúdo pode fundamentar respostas, mas nome, páginas, trechos, IDs e links do manual não são retornados nas citações públicas. Ele não substitui FISPQs ou normas técnicas.
 
@@ -212,6 +214,14 @@ Em `POST /v1/chat`, `response.requires_human_validation` informa se a resposta d
 
 Todas as rotas de negócio exigem `Authorization: Bearer <jwt-da-volta-api>`. O chatbot valida a assinatura e a expiração do JWT emitido pela `volta-api`, usa o e-mail do `sub` para buscar os UUIDs atuais em `users.id` e `users.company_id`, e deriva deles o usuário e a empresa. `tenant_id`, `user_id` e `company_id` enviados pelo cliente não definem o escopo autorizado. Configure `JWT_KEY` no secret `chatbot-secrets` com o mesmo valor usado pela `volta-api`; nunca versione essa chave.
 
+## Configuração local e dependências
+
+Use `.env.example` como catálogo de variáveis. `GEMINI_API_KEY` é necessária para embeddings e RAG; sem ela a aplicação interrompe o startup com motivo explícito. `GROQ_API_KEY` é opcional quando Gemini estiver configurado. QA e produção também precisam dos secrets de banco, JWT e Qdrant descritos no exemplo. LangSmith é opcional e só exporta traces quando `VOLTA_LANGSMITH_ENABLED=true`.
+
+`requirements.txt` é o lock de produção para Python 3.12; `requirements.in` contém as faixas-fonte. `requirements-dev.txt` fixa pytest e Ruff para desenvolvimento/CI. Dependências de teste não são instaladas na imagem. Para atualizar os locks, use `uv pip compile requirements.in --output-file requirements.txt --python-version 3.12 --universal --generate-hashes` e o mesmo comando com `requirements-dev.in` e `requirements-dev.txt`. `pandas` e `scikit-learn` permanecem porque o modelo preditivo importa essas bibliotecas; o uso real de memória deve ser medido no cluster antes de ajustar os limites de 1 GiB.
+
+O CI instala `requirements-dev.txt`, roda `ruff check . --select E4,E7,E9,F`, importa a aplicação e executa pytest. O lint cobre erros de sintaxe, nomes não definidos e imports básicos; regras estilísticas mais amplas ficam fora do gate para não transformar esta entrega em uma reformatação geral. O build publica `qa-<sha>` ao receber push em `develop` e `prod-<sha>` em `main`, notificando o DevOps com o secret `DEVOPS_DISPATCH_TOKEN`; o workflow manual só publica QA. O job de deploy do DevOps usa o Environment `prod`, que deve manter aprovação manual configurada. CORS aceita somente origens explícitas; `CORS_ORIGINS=*` é rejeitado porque credenciais estão habilitadas. Os métodos continuam em GET/POST: as rotas atuais não expõem DELETE de sessão.
+
 ## Estrutura do código de IA
 
 ~~~text
@@ -243,11 +253,11 @@ volta-chatbot/
 
 ## Execução local
 
-1. Crie um arquivo `.env` com as credenciais e URLs dos serviços.
-2. Instale as dependências:
+1. Copie `.env.example` para `.env` e substitua os placeholders localmente; não versione `.env`.
+2. Use Python 3.12 e instale as dependências de runtime e desenvolvimento:
 
 ~~~bash
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.txt -r requirements-dev.txt
 ~~~
 
 3. Inicie a API:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -27,6 +28,7 @@ from app.db.models import SourceCitation
 
 Corpus = Literal["operational", "regulatory", "cooperatives", "history"]
 CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history")
+logger = logging.getLogger(__name__)
 
 
 def _is_internal_document(metadata: dict, corpus: Corpus | None = None) -> bool:
@@ -59,6 +61,28 @@ class FederatedRag:
 
     def _collection_name(self, corpus: Corpus) -> str:
         return f"{self.settings.qdrant_collection_prefix}_{corpus}"
+
+    def log_knowledge_base_status(self) -> None:
+        """Reporta corpora estáticos ausentes sem registrar dados ou credenciais."""
+        for corpus in ("operational", "regulatory", "cooperatives"):
+            if self._qdrant is None:
+                available = (self._path(corpus) / "index.faiss").is_file()
+                if not available:
+                    logger.warning("RAG corpus '%s' indisponível: índice FAISS não encontrado.", corpus)
+                continue
+
+            collection = self._collection_name(corpus)
+            try:
+                if not self._qdrant.collection_exists(collection):
+                    logger.warning("RAG corpus '%s' indisponível: coleção Qdrant ausente.", corpus)
+                    continue
+                points = self._qdrant.count(collection_name=collection, exact=False).count
+                if points == 0:
+                    logger.warning("RAG corpus '%s' indisponível: coleção Qdrant vazia.", corpus)
+                else:
+                    logger.info("RAG corpus '%s' disponível (%s pontos).", corpus, points)
+            except Exception:
+                logger.warning("Não foi possível verificar o corpus RAG '%s'.", corpus)
 
     def _path(self, corpus: Corpus) -> Path:
         return self.base_path / corpus

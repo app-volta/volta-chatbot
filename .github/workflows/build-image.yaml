@@ -4,14 +4,8 @@ on:
   push:
     branches:
       - develop
+      - main
   workflow_dispatch:
-    inputs:
-      environment:
-        description: Ambiente da imagem
-        required: true
-        type: choice
-        default: qa
-        options: [qa, prod]
 
 permissions:
   contents: read
@@ -20,22 +14,26 @@ permissions:
 jobs:
   build-on-push:
     if: github.event_name == 'push'
-    uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@main
+    uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@v1
+    with:
+      image-name: chatbot
+      environment: ${{ github.ref_name == 'main' && 'prod' || 'qa' }}
+      context: .
+      dockerfile: ./Dockerfile
+      push: true
+      notify-devops: true
+    secrets:
+      devops-dispatch-token: ${{ secrets.DEVOPS_DISPATCH_TOKEN }}
+
+  build-manual:
+    if: github.event_name == 'workflow_dispatch'
+    uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@v1
     with:
       image-name: chatbot
       environment: qa
       context: .
       dockerfile: ./Dockerfile
       push: true
-      notify-devops: false
-
-  build-manual:
-    if: github.event_name == 'workflow_dispatch'
-    uses: app-volta/volta-devops/.github/workflows/reusable-docker-build-push.yaml@main
-    with:
-      image-name: chatbot
-      environment: ${{ github.event.inputs.environment }}
-      context: .
-      dockerfile: ./Dockerfile
-      push: true
-      notify-devops: false
+      notify-devops: true
+    secrets:
+      devops-dispatch-token: ${{ secrets.DEVOPS_DISPATCH_TOKEN }}
