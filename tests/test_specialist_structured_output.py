@@ -1,4 +1,5 @@
 import json
+from contextvars import ContextVar
 
 from langchain_core.messages import AIMessage
 
@@ -7,26 +8,56 @@ from app.db.models import SpecialistResult
 
 
 class FakeTelemetry:
+    def __init__(self):
+        self.records = []
+
     def timer(self):
         return 0
 
     def record_agent(self, *args, **kwargs):
-        pass
+        self.records.append((args, kwargs))
 
 
 class FakeExecutor:
-    def __init__(self, content):
+    def __init__(self, content=None, *, failure=None, before=None):
         self.content = content
+        self.failure = failure
+        self.before = before
         self.config = None
+        self.input = None
 
     def invoke(self, _input, *, config=None):
         self.config = config
+        self.input = _input
+        if self.before:
+            self.before()
+        if self.failure:
+            raise self.failure
         return {"messages": [AIMessage(content=self.content)]}
+
+
+class FakeStructuredOutput:
+    def __init__(self, value):
+        self.value = value
+
+    def invoke(self, _prompt, config=None):
+        return self.value
+
+
+class FakeModel:
+    def __init__(self, value):
+        self.value = value
+        self.methods = []
+
+    def with_structured_output(self, _schema, **kwargs):
+        self.methods.append(kwargs.get("method"))
+        return FakeStructuredOutput(self.value)
 
 
 def _team():
     team = object.__new__(AgentTeam)
     team.telemetry = FakeTelemetry()
+    team._norm_citation_sink = ContextVar("test_norm_citations", default=None)
     return team
 
 
@@ -71,16 +102,39 @@ def test_structured_specialist_response_skips_conversion_fallback(monkeypatch):
     assert executor.config["recursion_limit"] == 12
 
 
-def test_invalid_specialist_json_uses_structured_output_fallback(monkeypatch):
+def test_invalid_specialist_json_uses_primary_structured_output():
     expected = SpecialistResult(metrics_summary={"answer": "Resultado"})
-
-    class FakeStructuredOutput:
-        def invoke(self, _prompt, config=None):
-            return expected
-
     team = _team()
-    monkeypatch.setattr(team, "_structured_specialist", lambda _schema: FakeStructuredOutput(), raising=False)
+    team._specialist_primary_model = FakeModel(expected)
 
     result = team._invoke_specialist("standards", FakeExecutor("not-json"), "fake:model", "payload")
 
     assert result == expected
+    assert team._specialist_primary_model.methods == [None]
+
+
+def test_failed_primary_restarts_fallback_with_clean_payload_and_citations():
+    team = _team()
+    base_citation, primary_citation, fallback_citation = object(), object(), object()
+    citations = [base_citation]
+    team._norm_citation_sink.set(citations)
+    payload = '{"question":"vidro"}'
+    primary = FakeExecutor(
+        failure=RuntimeError("provider error"),
+        before=lambda: citations.append(primary_citation),
+    )
+    fallback = FakeExecutor(
+        SpecialistResult(metrics_summary={"answer": "Resultado"}).model_dump_json(),
+        before=lambda: citations.append(fallback_citation),
+    )
+
+    result = team._invoke_specialist(
+        "standards", primary, "gemini:test", payload,
+        fallback_executor=fallback, fallback_model="groq:test",
+    )
+
+    assert result.metrics_summary == {"answer": "Resultado"}
+    assert fallback.input == {"messages": [("user", payload)]}
+    assert citations == [base_citation, fallback_citation]
+    assert len(team.telemetry.records) == 1
+    assert team.telemetry.records[0][1]["fallback_used"] is True

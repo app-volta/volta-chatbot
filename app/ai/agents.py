@@ -160,9 +160,10 @@ class AgentTeam:
                     api_key=self.settings.groq_api_key.get_secret_value(),
                     timeout=45,
                     max_retries=2,
+                    model_kwargs={"parallel_tool_calls": False},
                 )
                 self._specialist_fallback_model = fallback
-                return primary.with_fallbacks([fallback]), f"gemini:{self.settings.gemini_model}"
+                return primary, f"gemini:{self.settings.gemini_model}"
             self._specialist_fallback_model = None
             return primary, f"gemini:{self.settings.gemini_model}"
         model, model_name = self._router_model()
@@ -174,7 +175,7 @@ class AgentTeam:
         parser = self._specialist_primary_model.with_structured_output(schema)
         if self._specialist_fallback_model is not None:
             parser = parser.with_fallbacks([
-                self._specialist_fallback_model.with_structured_output(schema)
+                self._specialist_fallback_model.with_structured_output(schema, method="json_schema")
             ])
         return parser
 
@@ -227,22 +228,30 @@ class AgentTeam:
         self.orchestrator = prompt_orchestrator | self.router_model.with_structured_output(CorporateAnswer)
 
         # 2. Especialistas com Tools -> Construídos nativamente com o LangGraph
-        def _build_specialist(prompt_text, tools):
+        def _build_specialist(prompt_text, tools, model):
             return create_react_agent(
-                self.specialist_model,
+                model,
                 tools=tools,
                 prompt=prompt_text,
             )
 
-        self.triage = _build_specialist(TRIAGE_PROMPT, [consultar_rag_operacional])
-        self.standards = _build_specialist(
-            STANDARDS_PROMPT,
-            [consultar_rag_operacional, consultar_rag_regulatorio, buscar_normas_residuos, detalhar_norma],
-        )
         # Dados do banco já chegam filtrados pelo tenant autenticado no grafo.
         # Não exponha consultas SQL a tools escolhidas pelo modelo.
-        self.data = _build_specialist(DATA_PROMPT, [])
-        self.performance = _build_specialist(PERFORMANCE_PROMPT, [consultar_rag_cooperativas])
+        specialist_specs = {
+            "triage": (TRIAGE_PROMPT, [consultar_rag_operacional]),
+            "standards": (
+                STANDARDS_PROMPT,
+                [consultar_rag_operacional, consultar_rag_regulatorio, buscar_normas_residuos, detalhar_norma],
+            ),
+            "data": (DATA_PROMPT, []),
+            "performance": (PERFORMANCE_PROMPT, [consultar_rag_cooperativas]),
+        }
+        for name, (prompt_text, tools) in specialist_specs.items():
+            setattr(self, name, _build_specialist(prompt_text, tools, self.specialist_model))
+        self._specialist_fallback_agents = {
+            name: _build_specialist(prompt_text, tools, self._specialist_fallback_model)
+            for name, (prompt_text, tools) in specialist_specs.items()
+        } if self._specialist_fallback_model is not None else {}
 
     @contextmanager
     def collect_norm_citations(self):
@@ -264,36 +273,98 @@ class AgentTeam:
             self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text="", failed=True, **usage.measurement())
             raise RuntimeError(f"Falha controlada no controlador {name}.") from exc
 
-    def _invoke_specialist(self, name: str, executor: Any, model: str, payload: str) -> SpecialistResult:
+    def _invoke_specialist(
+        self,
+        name: str,
+        executor: Any,
+        model: str,
+        payload: str,
+        *,
+        fallback_executor: Any | None = None,
+        fallback_model: str | None = None,
+    ) -> SpecialistResult:
         started = self.telemetry.timer()
         usage = ModelUsage(model)
-        try:
+        citation_sink = self._norm_citation_sink.get()
+        citation_count = len(citation_sink) if citation_sink is not None else 0
+
+        def invoke(executor: Any, tracker: ModelUsage, *, fallback: bool = False) -> SpecialistResult:
             result = executor.invoke(
                 {"messages": [("user", payload)]},
-                config={"recursion_limit": SPECIALIST_RECURSION_LIMIT, "callbacks": [usage]},
+                config={"recursion_limit": SPECIALIST_RECURSION_LIMIT, "callbacks": [tracker]},
             )
             final_message = result["messages"][-1]
             content = final_message.content
             if isinstance(content, list):
-                content = "".join(
-                    block.get("text", "") for block in content if isinstance(block, dict)
-                )
+                content = "".join(block.get("text", "") for block in content if isinstance(block, dict))
             try:
-                parsed = SpecialistResult.model_validate_json(content)
+                return SpecialistResult.model_validate_json(content)
             except (ValueError, TypeError):
-                parsed = self._structured_specialist(SpecialistResult).invoke(
+                parser = (
+                    self._specialist_fallback_model.with_structured_output(
+                        SpecialistResult, method="json_schema"
+                    )
+                    if fallback and self._specialist_fallback_model is not None
+                    else self._specialist_primary_model.with_structured_output(SpecialistResult)
+                )
+                return parser.invoke(
                     "Converta a resposta abaixo para SpecialistResult. Preserve apenas informações fornecidas; "
                     "se campos não se aplicarem, use null. Resposta: " + str(content),
-                    config={"callbacks": [usage]},
+                    config={"callbacks": [tracker]},
                 )
 
-            self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text=parsed.model_dump_json(), **usage.measurement())
-            return parsed
-        except Exception as exc:
-            log_exception_without_details(logger, f"Specialist {name} failed", exc)
+        def usage_details(fallback_usage: ModelUsage | None = None) -> dict[str, Any]:
+            primary = usage.measurement()
+            if fallback_usage is None:
+                return primary
+            fallback = fallback_usage.measurement()
+            return {
+                "model": fallback_model or fallback["model"],
+                "fallback_used": True,
+                "usage": (primary.get("usage") or []) + (fallback.get("usage") or []) or None,
+                "usage_complete": primary["usage_complete"] and fallback["usage_complete"],
+            }
 
-            self.telemetry.record_agent(name, started_at=started, prompt_text=payload, response_text="", failed=True, **usage.measurement())
-            raise RuntimeError(f"Falha controlada no especialista {name}.") from exc
+        try:
+            parsed = invoke(executor, usage)
+            self.telemetry.record_agent(
+                name, started_at=started, prompt_text=payload,
+                response_text=parsed.model_dump_json(), **usage_details(),
+            )
+            return parsed
+        except Exception as primary_exc:
+            if fallback_executor is None or fallback_model is None:
+                log_exception_without_details(logger, f"Specialist {name} failed", primary_exc)
+                self.telemetry.record_agent(
+                    name, started_at=started, prompt_text=payload, response_text="",
+                    failed=True, **usage_details(),
+                )
+                raise RuntimeError(f"Falha controlada no especialista {name}.") from primary_exc
+
+            log_exception_without_details(
+                logger,
+                f"Primary specialist {name} failed; restarting with fallback provider",
+                primary_exc,
+                level=logging.WARNING,
+            )
+            if citation_sink is not None:
+                del citation_sink[citation_count:]
+            fallback_usage = ModelUsage(fallback_model)
+            try:
+                parsed = invoke(fallback_executor, fallback_usage, fallback=True)
+            except Exception as fallback_exc:
+                log_exception_without_details(logger, f"Fallback specialist {name} failed", fallback_exc)
+                self.telemetry.record_agent(
+                    name, started_at=started, prompt_text=payload, response_text="",
+                    failed=True, **usage_details(fallback_usage),
+                )
+                raise RuntimeError(f"Falha controlada no especialista {name}.") from fallback_exc
+
+            self.telemetry.record_agent(
+                name, started_at=started, prompt_text=payload,
+                response_text=parsed.model_dump_json(), **usage_details(fallback_usage),
+            )
+            return parsed
 
     def route(self, message: str) -> RouteDecision:
         return self._invoke_controller("router", self.router, self.router_model_name, f"Data UTC: {temporal_context()}\n\nMensagem: {message}")
@@ -314,7 +385,14 @@ class AgentTeam:
             "evidence": [_evidence_payload(item) for item in evidence],
             "database_data": data or [],
         }
-        return self._invoke_specialist(route, selected, self.specialist_model_name, json.dumps(context, ensure_ascii=False, default=str))
+        return self._invoke_specialist(
+            route,
+            selected,
+            self.specialist_model_name,
+            json.dumps(context, ensure_ascii=False, default=str),
+            fallback_executor=self._specialist_fallback_agents.get(route),
+            fallback_model=f"groq:{self.settings.groq_router_model}" if self._specialist_fallback_model else None,
+        )
 
     def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:
         context = {
