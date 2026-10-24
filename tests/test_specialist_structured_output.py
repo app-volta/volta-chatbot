@@ -41,6 +41,8 @@ class FakeStructuredOutput:
         self.value = value
 
     def invoke(self, _prompt, config=None):
+        if isinstance(self.value, Exception):
+            raise self.value
         return self.value
 
 
@@ -138,3 +140,25 @@ def test_failed_primary_restarts_fallback_with_clean_payload_and_citations():
     assert citations == [base_citation, fallback_citation]
     assert len(team.telemetry.records) == 1
     assert team.telemetry.records[0][1]["fallback_used"] is True
+
+
+def test_failed_primary_parser_restarts_with_groq_json_schema():
+    expected = SpecialistResult(metrics_summary={"answer": "Resultado"})
+    team = _team()
+    team._specialist_primary_model = FakeModel(RuntimeError("primary parse failed"))
+    team._specialist_fallback_model = FakeModel(expected)
+    payload = '{"question":"vidro"}'
+    fallback = FakeExecutor("not-json")
+
+    result = team._invoke_specialist(
+        "standards",
+        FakeExecutor("not-json"),
+        "gemini:test",
+        payload,
+        fallback_executor=fallback,
+        fallback_model="groq:test",
+    )
+
+    assert result == expected
+    assert team._specialist_fallback_model.methods == ["json_schema"]
+    assert fallback.input == {"messages": [("user", payload)]}
