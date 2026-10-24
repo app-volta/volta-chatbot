@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-2.5-flash"
     groq_api_key: SecretStr | None = None
-    groq_router_model: str = "llama-3.3-70b-versatile"
+    groq_router_model: str = "openai/gpt-oss-120b"
 
     postgres_dsn: SecretStr = Field(
         default=SecretStr("postgresql://volta:volta@localhost:5432/volta"),
