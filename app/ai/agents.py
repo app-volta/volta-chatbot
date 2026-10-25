@@ -6,6 +6,7 @@ import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
+from time import perf_counter
 from typing import Any, TypeVar
 
 from langgraph.prebuilt import create_react_agent
@@ -43,6 +44,10 @@ logger = logging.getLogger(__name__)
 SPECIALIST_RECURSION_LIMIT = 12
 
 
+def _citation_identity(citation: SourceCitation) -> tuple[str, str, str | None, str]:
+    return citation.source_id, citation.title, citation.location, citation.excerpt
+
+
 class _NormsToolError(RuntimeError):
     pass
 
@@ -57,6 +62,8 @@ def _is_recoverable_norms_error(exc: BaseException) -> bool:
 
 
 def _call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    started = perf_counter()
+
     async def call() -> dict[str, Any]:
         async with create_connected_server_and_client_session(norms_mcp_server) as session:
             response = await session.call_tool(tool_name, arguments)
@@ -71,15 +78,25 @@ def _call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]
         return payload
 
     try:
-        return asyncio.run(call())
+        payload = asyncio.run(call())
     except ExceptionGroup as exc:
         if not _is_recoverable_norms_error(exc):
             raise
         log_exception_without_details(logger, "Norms MCP call failed; continuing with available RAG evidence", exc)
-        return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+        payload = {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
     except _NORMS_RECOVERABLE_ERRORS as exc:
         log_exception_without_details(logger, "Norms MCP call failed; continuing with available RAG evidence", exc)
-        return {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+        payload = {"error": "Catálogo externo temporariamente indisponível; use as evidências RAG disponíveis."}
+
+    citations = _norm_citations(payload)
+    logger.info(
+        "Norms tool completed tool=%s status=%s duration_ms=%.1f citation_count=%s",
+        tool_name,
+        "error" if "error" in payload else "success",
+        (perf_counter() - started) * 1000,
+        len(citations),
+    )
+    return payload
 
 
 def _norm_citations(payload: dict[str, Any]) -> list[SourceCitation]:
@@ -113,6 +130,9 @@ class AgentTeam:
         self.telemetry = telemetry
         self._norm_citation_sink: ContextVar[list[SourceCitation] | None] = ContextVar(
             f"norm_citations_{id(self)}", default=None
+        )
+        self._rag_citation_sink: ContextVar[list[SourceCitation] | None] = ContextVar(
+            f"rag_citations_{id(self)}", default=None
         )
         self.router_model, self.router_model_name = self._router_model()
         self.specialist_model, self.specialist_model_name = self._specialist_model()
@@ -180,29 +200,59 @@ class AgentTeam:
         return parser
 
     def _create_agents(self) -> None:
+        def retrieve_rag(corpus: str, query: str) -> list[SourceCitation]:
+            started = perf_counter()
+            try:
+                citations = self.rag.retrieve(corpus, query)
+            except Exception:
+                logger.info(
+                    "RAG tool completed corpus=%s status=error duration_ms=%.1f citation_count=0",
+                    corpus,
+                    (perf_counter() - started) * 1000,
+                )
+                raise
+            sink = self._rag_citation_sink.get()
+            if sink is not None:
+                known = {_citation_identity(item) for item in sink}
+                for item in citations:
+                    identity = _citation_identity(item)
+                    if identity not in known:
+                        sink.append(item)
+                        known.add(identity)
+            logger.info(
+                "RAG tool completed corpus=%s status=success duration_ms=%.1f citation_count=%s",
+                corpus,
+                (perf_counter() - started) * 1000,
+                len(citations),
+            )
+            return citations
+
         def call_norms_mcp(tool_name: str, arguments: dict[str, Any]) -> str:
             payload = _call_norms_mcp(tool_name, arguments)
             sink = self._norm_citation_sink.get()
             if sink is not None:
+                known = {_citation_identity(item) for item in sink}
                 for citation in _norm_citations(payload):
-                    if all(item.source_id != citation.source_id for item in sink):
+                    identity = _citation_identity(citation)
+                    if identity not in known:
                         sink.append(citation)
+                        known.add(identity)
             return json.dumps(payload, ensure_ascii=False)
 
         @tool
         def consultar_rag_operacional(query: str) -> str:
             """Consulta conteúdo de manuais industriais e FISPQs sem expor metadados internos."""
-            return serialize_citations(self.rag.retrieve("operational", query))
+            return serialize_citations(retrieve_rag("operational", query))
 
         @tool
         def consultar_rag_regulatorio(query: str) -> str:
             """Consulta fontes regulatórias e ODS 12 indexados, com fonte e trecho."""
-            return serialize_citations(self.rag.retrieve("regulatory", query))
+            return serialize_citations(retrieve_rag("regulatory", query))
 
         @tool
         def consultar_rag_cooperativas(query: str) -> str:
             """Consulta contratos e regras operacionais de cooperativas indexados."""
-            return serialize_citations(self.rag.retrieve("cooperatives", query))
+            return serialize_citations(retrieve_rag("cooperatives", query))
 
         @tool
         def buscar_normas_residuos(termo: str, ano: int | None = None, assunto: str | None = None, limite: int = 5) -> str:
@@ -262,6 +312,15 @@ class AgentTeam:
         finally:
             self._norm_citation_sink.reset(token)
 
+    @contextmanager
+    def collect_rag_citations(self):
+        citations: list[SourceCitation] = []
+        token = self._rag_citation_sink.set(citations)
+        try:
+            yield citations
+        finally:
+            self._rag_citation_sink.reset(token)
+
     def _invoke_controller(self, name: str, runnable: Any, model: str, payload: str) -> Any:
         started = self.telemetry.timer()
         usage = ModelUsage(model)
@@ -287,6 +346,8 @@ class AgentTeam:
         usage = ModelUsage(model)
         citation_sink = self._norm_citation_sink.get()
         citation_count = len(citation_sink) if citation_sink is not None else 0
+        rag_citation_sink = self._rag_citation_sink.get()
+        rag_citation_count = len(rag_citation_sink) if rag_citation_sink is not None else 0
 
         def invoke(executor: Any, tracker: ModelUsage, *, fallback: bool = False) -> SpecialistResult:
             result = executor.invoke(
@@ -349,6 +410,8 @@ class AgentTeam:
             )
             if citation_sink is not None:
                 del citation_sink[citation_count:]
+            if rag_citation_sink is not None:
+                del rag_citation_sink[rag_citation_count:]
             fallback_usage = ModelUsage(fallback_model)
             try:
                 parsed = invoke(fallback_executor, fallback_usage, fallback=True)
@@ -394,8 +457,16 @@ class AgentTeam:
             fallback_model=f"groq:{self.settings.groq_router_model}" if self._specialist_fallback_model else None,
         )
 
-    def judge_result(self, specialist: SpecialistResult, evidence: list, data: list[dict] | None = None) -> JudgeVerdict:
+    def judge_result(
+        self,
+        specialist: SpecialistResult,
+        evidence: list,
+        data: list[dict] | None = None,
+        *,
+        route: str | None = None,
+    ) -> JudgeVerdict:
         context = {
+            "route": route,
             "specialist_result": specialist.model_dump(mode="json"),
             "evidence": [_evidence_payload(item) for item in evidence],
             "database_data": data or [],
