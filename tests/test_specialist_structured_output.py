@@ -60,6 +60,7 @@ def _team():
     team = object.__new__(AgentTeam)
     team.telemetry = FakeTelemetry()
     team._norm_citation_sink = ContextVar("test_norm_citations", default=None)
+    team._rag_citation_sink = ContextVar("test_rag_citations", default=None)
     return team
 
 
@@ -119,15 +120,17 @@ def test_failed_primary_restarts_fallback_with_clean_payload_and_citations():
     team = _team()
     base_citation, primary_citation, fallback_citation = object(), object(), object()
     citations = [base_citation]
+    rag_citations = [base_citation]
     team._norm_citation_sink.set(citations)
+    team._rag_citation_sink.set(rag_citations)
     payload = '{"question":"vidro"}'
     primary = FakeExecutor(
         failure=RuntimeError("provider error"),
-        before=lambda: citations.append(primary_citation),
+        before=lambda: (citations.append(primary_citation), rag_citations.append(primary_citation)),
     )
     fallback = FakeExecutor(
         SpecialistResult(metrics_summary={"answer": "Resultado"}).model_dump_json(),
-        before=lambda: citations.append(fallback_citation),
+        before=lambda: (citations.append(fallback_citation), rag_citations.append(fallback_citation)),
     )
 
     result = team._invoke_specialist(
@@ -138,6 +141,7 @@ def test_failed_primary_restarts_fallback_with_clean_payload_and_citations():
     assert result.metrics_summary == {"answer": "Resultado"}
     assert fallback.input == {"messages": [("user", payload)]}
     assert citations == [base_citation, fallback_citation]
+    assert rag_citations == [base_citation, fallback_citation]
     assert len(team.telemetry.records) == 1
     assert team.telemetry.records[0][1]["fallback_used"] is True
 

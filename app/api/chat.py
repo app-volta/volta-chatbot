@@ -46,9 +46,25 @@ def _history_context(messages: list[dict]) -> list[dict[str, str]]:
     ][-8:]
 
 
-def _enforce_judge_verdict(answer, citations, specialist, judge):
+def _enforce_judge_verdict(answer, citations, specialist, judge, route=None):
     if judge is None or judge.approved:
         return answer, citations, specialist, judge
+
+    if route == RouteName.STANDARDS:
+        return (
+            CorporateAnswer(
+                title="Não consegui confirmar essa informação",
+                answer=(
+                    "Não consegui verificar a resposta nas fontes disponíveis. Posso explicar conceitos gerais; "
+                    "para detalhes de lei, vigência, valores ou recomendações técnicas, preciso de evidência verificável."
+                ),
+                recommended_actions=["Forneça uma fonte confiável ou pergunte sobre o conceito geral."],
+                requires_human_validation=answer.requires_human_validation,
+            ),
+            [],
+            None,
+            JudgeVerdict(approved=False, reason="As evidências disponíveis não sustentaram as afirmações específicas."),
+        )
 
     return (
         CorporateAnswer(
@@ -171,7 +187,9 @@ async def _process_chat(
         if result.get("judge"):
             judge = JudgeVerdict.model_validate(result["judge"])
 
-        answer, citations, specialist, judge = _enforce_judge_verdict(answer, citations, specialist, judge)
+        answer, citations, specialist, judge = _enforce_judge_verdict(
+            answer, citations, specialist, judge, route
+        )
         answer = answer.model_copy(update={
             "answer": guardrail_saida(
                 answer.answer,
@@ -196,7 +214,7 @@ async def _process_chat(
         # 7. Finalização, persistência e telemetria
         await _mongo_call(sessions.append_message, payload.session_id, "assistant", answer.answer, str(request_id))
         if judge is not None:
-            telemetry.record_judge(judge.approved, human_intervention=not judge.approved)
+            telemetry.record_judge(judge.approved, human_intervention=answer.requires_human_validation)
         if answer.requires_human_validation and (judge is None or judge.approved):
             telemetry.record_human_intervention("answer_requires_validation")
         telemetry.record_request(route.value, started, "success", request_id=str(request_id))

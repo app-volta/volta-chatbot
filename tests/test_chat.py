@@ -11,7 +11,7 @@ from app.api.chat import _enforce_judge_verdict, _mongo_call
 from app.api.chat import router as chat_router
 from app.core.auth import RequestIdentity, get_current_identity
 from app.core.dependencies import get_graph, get_sessions, get_telemetry
-from app.db.models import CorporateAnswer, JudgeVerdict, ProposedOccurrence, SourceCitation, SpecialistResult, TriageAnalysis
+from app.db.models import CorporateAnswer, JudgeVerdict, ProposedOccurrence, RouteName, SourceCitation, SpecialistResult, TriageAnalysis
 
 
 def test_rejected_judge_suppresses_unverified_specialist_fields_and_citations():
@@ -45,6 +45,30 @@ def test_rejected_judge_suppresses_unverified_specialist_fields_and_citations():
     assert safe_judge.reason is not None
     assert "300" not in safe_judge.reason
     assert "275" not in safe_judge.reason
+
+
+def test_rejected_standards_judge_suppresses_unverified_claims_without_human_gate():
+    answer = CorporateAnswer(answer="A PNRS define 300 kg conforme CONAMA 275.")
+    citations = [SourceCitation(source_id="guide", title="Guia", corpus="regulatory", excerpt="300 kg")]
+    specialist = SpecialistResult(metrics_summary={"answer": answer.answer})
+    judge = JudgeVerdict(approved=False, reason="A norma e o limite não têm suporte.")
+
+    safe_answer, safe_citations, safe_specialist, safe_judge = _enforce_judge_verdict(
+        answer, citations, specialist, judge, RouteName.STANDARDS
+    )
+
+    assert "300" not in safe_answer.answer
+    assert "275" not in safe_answer.answer
+    assert safe_answer.requires_human_validation is False
+    assert safe_citations == []
+    assert safe_specialist is None
+    assert safe_judge.approved is False
+
+    answer.requires_human_validation = True
+    reviewed_answer, _, _, _ = _enforce_judge_verdict(
+        answer, citations, specialist, judge, RouteName.STANDARDS
+    )
+    assert reviewed_answer.requires_human_validation is True
 
 
 class FakeSessions:

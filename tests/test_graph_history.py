@@ -23,8 +23,13 @@ class FakeTeam:
         self.received_history = history
         return SpecialistResult(metrics_summary={"answer": "Resposta de teste"})
 
-    def judge_result(self, specialist, evidence, data=None):
+    def judge_result(self, specialist, evidence, data=None, *, route=None):
+        self.received_route = route
         return JudgeVerdict(approved=True)
+
+    @contextmanager
+    def collect_rag_citations(self):
+        yield []
 
     def format_answer(self, route, specialist, judge, direct_reply=None):
         self.received_verdict = judge
@@ -60,6 +65,10 @@ class FakeStandardsTeam(FakeTeam):
     def collect_norm_citations(self):
         yield [SourceCitation(source_id="mma-1", title="Norma MMA", corpus="regulatory", excerpt="Ementa")]
 
+    @contextmanager
+    def collect_rag_citations(self):
+        yield [SourceCitation(source_id="rag-1", title="Guia", corpus="operational", excerpt="Orientação")]
+
 
 def test_graph_adds_mcp_norm_citations_to_response_evidence():
     graph = build_volta_graph(FakeStandardsTeam(), FakeRag(), MemorySaver())
@@ -75,11 +84,12 @@ def test_graph_adds_mcp_norm_citations_to_response_evidence():
         config={"configurable": {"thread_id": "session-2"}},
     )
 
-    assert [item.source_id for item in result["evidence"]] == ["mma-1"]
+    assert [item.source_id for item in result["evidence"]] == ["rag-1", "mma-1"]
 
 
 class FakeRejectedTeam(FakeTeam):
-    def judge_result(self, specialist, evidence, data=None):
+    def judge_result(self, specialist, evidence, data=None, *, route=None):
+        self.received_route = route
         return JudgeVerdict(approved=False, reason="Rascunho contém status sem fonte.")
 
 
@@ -102,8 +112,51 @@ def test_graph_passes_rejected_verdict_to_orchestrator():
     assert team.received_verdict.approved is False
     assert team.received_verdict.reason == "Rascunho contém status sem fonte."
     assert "judge.reason" in ORCHESTRATOR_PROMPT
-    assert "requires_human_validation=true" in ORCHESTRATOR_PROMPT
-    assert "números, normas ou afirmações contestados" in ORCHESTRATOR_PROMPT
+    assert "use judge.reason para localizar a lacuna" in ORCHESTRATOR_PROMPT
+
+
+def test_evidence_merge_preserves_distinct_chunks_from_same_source():
+    from app.ai.graph import _merge_evidence
+
+    first = SourceCitation(
+        source_id="guide", title="Guia", corpus="regulatory", location="página web", excerpt="Primeiro trecho"
+    )
+    second = SourceCitation(
+        source_id="guide", title="Guia", corpus="regulatory", location="página web", excerpt="Segundo trecho"
+    )
+
+    assert _merge_evidence([first], [second]) == [first, second]
+
+
+class FakeStandardsNeedsReviewTeam(FakeRejectedTeam):
+    def route(self, message):
+        return RouteDecision(route=RouteName.STANDARDS, rationale="Teste")
+
+    @contextmanager
+    def collect_norm_citations(self):
+        yield []
+
+    def format_answer(self, route, specialist, judge, direct_reply=None):
+        return CorporateAnswer(answer="A decisão requer análise técnica.", requires_human_validation=True)
+
+
+def test_rejected_standards_keeps_explicit_human_validation_requirement():
+    graph = build_volta_graph(FakeStandardsNeedsReviewTeam(), FakeRag(), MemorySaver())
+    result = graph.invoke(
+        {
+            "messages": [{"role": "user", "content": "Posso aplicar este procedimento na planta?"}],
+            "request_id": "request-standards-review",
+            "user_id": "user-1",
+            "tenant_id": "tenant-1",
+            "session_id": "session-standards-review",
+            "input_text": "Posso aplicar este procedimento na planta?",
+        },
+        config={"configurable": {"thread_id": "session-standards-review"}},
+    )
+
+    assert result["judge"].approved is False
+    assert result["corporate_answer"].requires_human_validation is True
+    assert "Validação obrigatória" in result["corporate_answer"].answer
 
 
 class AlternatingTeam(FakeTeam):
