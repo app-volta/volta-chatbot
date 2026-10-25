@@ -21,6 +21,7 @@ from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
 
 from app.core.config import Settings
@@ -29,6 +30,27 @@ from app.db.models import SourceCitation
 Corpus = Literal["operational", "regulatory", "cooperatives", "history"]
 CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history")
 logger = logging.getLogger(__name__)
+
+
+def _qdrant_error_category(exc: UnexpectedResponse) -> str:
+    try:
+        response = exc.structured()
+    except ValueError:
+        return "unstructured"
+    status = response.get("status") if isinstance(response, dict) else None
+    error = status.get("error") if isinstance(status, dict) else None
+    if not isinstance(error, str):
+        return "unclassified"
+    message = error.casefold()
+    if "dimension" in message and "vector" in message:
+        return "vector_dimension"
+    if any(term in message for term in ("filter", "condition", "payload", "index")):
+        return "payload_filter"
+    if "collection" in message:
+        return "collection"
+    if any(term in message for term in ("wrong input", "bad input", "invalid")):
+        return "request_validation"
+    return "unclassified"
 
 
 def _is_internal_document(metadata: dict, corpus: Corpus | None = None) -> bool:
@@ -381,14 +403,23 @@ class FederatedRag:
                     FieldCondition(key="metadata.user_id", match=MatchValue(value=user_id)),
                 ]
             )
-        results = self._qdrant.query_points(
-            collection_name=collection_name,
-            query=vector,
-            limit=k,
-            with_payload=True,
-            score_threshold=0.35,
-            query_filter=query_filter,
-        ).points
+        try:
+            results = self._qdrant.query_points(
+                collection_name=collection_name,
+                query=vector,
+                limit=k,
+                with_payload=True,
+                score_threshold=0.35,
+                query_filter=query_filter,
+            ).points
+        except UnexpectedResponse as exc:
+            logger.error(
+                "Qdrant query rejected corpus=%s status=%s error_category=%s",
+                corpus,
+                exc.status_code,
+                _qdrant_error_category(exc),
+            )
+            raise
         citations: list[SourceCitation] = []
         for result in results:
             payload = result.payload or {}

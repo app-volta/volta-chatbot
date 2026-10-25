@@ -1,4 +1,5 @@
 from hashlib import sha256
+import logging
 from pathlib import Path
 import subprocess
 import sys
@@ -7,6 +8,7 @@ import httpx
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 import pytest
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.ai.multi_rag import FederatedRag
 from app.core.config import Settings
@@ -82,6 +84,36 @@ def test_qdrant_corpora_reach_triage_without_cross_tenant_history(tmp_path):
     assert {citation.title for citation in tenant_a} == {"histórico", "manual"}
     assert [citation.title for citation in tenant_b] == ["manual"]
     assert rag._qdrant.collection_exists("test-volta_operational")
+
+
+def test_qdrant_query_error_logs_safe_category_without_response_body(tmp_path, caplog, monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        rag_base_path=str(tmp_path / "faiss"),
+        qdrant_url=":memory:",
+        qdrant_collection_prefix="test-volta",
+    )
+    rag = FederatedRag(settings, embeddings=ConstantEmbeddings())
+    rag.ingest_documents(
+        "history",
+        [Document(page_content="Resumo privado.", metadata={"tenant_id": "tenant-a", "user_id": "user-a"})],
+    )
+
+    def reject_query(**kwargs):
+        raise UnexpectedResponse(
+            status_code=400,
+            reason_phrase="Bad Request",
+            content=b'{"status":{"error":"Invalid filter value private-user-value"}}',
+            headers=httpx.Headers(),
+        )
+
+    monkeypatch.setattr(rag._qdrant, "query_points", reject_query)
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UnexpectedResponse):
+            rag.retrieve("history", "papelão", tenant_id="tenant-a", user_id="user-a")
+
+    assert "corpus=history status=400 error_category=payload_filter" in caplog.text
+    assert "private-user-value" not in caplog.text
 
 
 def test_faiss_history_requires_exact_user_and_rejects_legacy_documents(tmp_path):
