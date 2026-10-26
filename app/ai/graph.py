@@ -159,6 +159,7 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             evidence,
             state.get("database_data", []),
             route=state.get("route"),
+            question=state.get("clean_input"),
         )
         logger.info(
             "Chat judge completed route=%s approved=%s evidence_count=%s evidence_by_corpus=%s",
@@ -173,9 +174,10 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         route = state["route"]
         specialist = state.get("specialist")
         verdict = state.get("judge")
-        
         # Se o juiz não aprovou, o orquestrador vai saber que precisa arrumar a resposta baseando-se no 'reason'
-        answer = team.format_answer(route, specialist, verdict, state.get("direct_reply"))
+        answer = team.format_answer(
+            route, specialist, verdict, state.get("direct_reply"), question=state.get("clean_input")
+        )
         return {"corporate_answer": answer}
 
     def blocked_response(state: VoltaState) -> dict:

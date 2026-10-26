@@ -165,12 +165,13 @@ class AgentTeam:
 
     def _specialist_model(self):
         if self.settings.gemini_api_key:
+            has_fallback = bool(self.settings.groq_api_key)
             primary = ChatGoogleGenerativeAI(
                 model=self.settings.gemini_model,
                 temperature=0.15,
                 google_api_key=self.settings.gemini_api_key.get_secret_value(),
-                timeout=45,
-                max_retries=2,
+                timeout=20 if has_fallback else 45,
+                max_retries=0 if has_fallback else 2,
             )
             self._specialist_primary_model = primary
             if self.settings.groq_api_key:
@@ -464,9 +465,11 @@ class AgentTeam:
         data: list[dict] | None = None,
         *,
         route: str | None = None,
+        question: str | None = None,
     ) -> JudgeVerdict:
         context = {
             "route": route,
+            "question": question,
             "specialist_result": specialist.model_dump(mode="json"),
             "evidence": [_evidence_payload(item) for item in evidence],
             "database_data": data or [],
@@ -493,6 +496,14 @@ class AgentTeam:
         )
         return result.summary.strip()
 
-    def format_answer(self, route: str, specialist: SpecialistResult | None, judge: JudgeVerdict | None, direct_reply: str | None = None) -> CorporateAnswer:
-        context = {"route": route, "specialist": specialist.model_dump(mode="json") if specialist else None, "judge": judge.model_dump(mode="json") if judge else None, "direct_reply": direct_reply}
+    def format_answer(
+        self,
+        route: str,
+        specialist: SpecialistResult | None,
+        judge: JudgeVerdict | None,
+        direct_reply: str | None = None,
+        *,
+        question: str | None = None,
+    ) -> CorporateAnswer:
+        context = {"route": route, "question": question, "specialist": specialist.model_dump(mode="json") if specialist else None, "judge": judge.model_dump(mode="json") if judge else None, "direct_reply": direct_reply}
         return self._invoke_controller("orchestrator", self.orchestrator, self.router_model_name, json.dumps(context, ensure_ascii=False, default=str))
