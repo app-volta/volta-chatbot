@@ -23,16 +23,18 @@ class FakeTeam:
         self.received_history = history
         return SpecialistResult(metrics_summary={"answer": "Resposta de teste"})
 
-    def judge_result(self, specialist, evidence, data=None, *, route=None):
+    def judge_result(self, specialist, evidence, data=None, *, route=None, question=None):
         self.received_route = route
+        self.received_question = question
         return JudgeVerdict(approved=True)
 
     @contextmanager
     def collect_rag_citations(self):
         yield []
 
-    def format_answer(self, route, specialist, judge, direct_reply=None):
+    def format_answer(self, route, specialist, judge, direct_reply=None, *, question=None):
         self.received_verdict = judge
+        self.received_format_question = question
         return CorporateAnswer(answer="Resposta de teste")
 
 
@@ -55,6 +57,8 @@ def test_graph_passes_prior_session_history_to_specialist():
     )
 
     assert team.received_history == history
+    assert team.received_question == "Qual a recomendação agora?"
+    assert team.received_format_question == "Qual a recomendação agora?"
 
 
 class FakeStandardsTeam(FakeTeam):
@@ -88,7 +92,7 @@ def test_graph_adds_mcp_norm_citations_to_response_evidence():
 
 
 class FakeRejectedTeam(FakeTeam):
-    def judge_result(self, specialist, evidence, data=None, *, route=None):
+    def judge_result(self, specialist, evidence, data=None, *, route=None, question=None):
         self.received_route = route
         return JudgeVerdict(approved=False, reason="Rascunho contém status sem fonte.")
 
@@ -136,7 +140,7 @@ class FakeStandardsNeedsReviewTeam(FakeRejectedTeam):
     def collect_norm_citations(self):
         yield []
 
-    def format_answer(self, route, specialist, judge, direct_reply=None):
+    def format_answer(self, route, specialist, judge, direct_reply=None, *, question=None):
         return CorporateAnswer(answer="A decisão requer análise técnica.", requires_human_validation=True)
 
 
@@ -165,7 +169,7 @@ class AlternatingTeam(FakeTeam):
             return RouteDecision(route=RouteName.TRIAGE, rationale="Teste")
         return RouteDecision(route=RouteName.DIRECT, rationale="Teste", direct_reply="Olá.")
 
-    def format_answer(self, route, specialist, judge, direct_reply=None):
+    def format_answer(self, route, specialist, judge, direct_reply=None, *, question=None):
         self.received_verdict = judge
         self.received_specialist = specialist
         return CorporateAnswer(answer=direct_reply or "Resposta de teste")
