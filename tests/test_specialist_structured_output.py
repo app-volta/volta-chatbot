@@ -1,10 +1,12 @@
 import json
 from contextvars import ContextVar
 
+import pytest
 from langchain_core.messages import AIMessage
 
 from app.ai.agents import AgentTeam
-from app.db.models import SpecialistResult
+from app.core.guardrails import guardrail_saida
+from app.db.models import JudgeVerdict, SpecialistResult
 
 
 class FakeTelemetry:
@@ -205,3 +207,38 @@ def test_groq_tool_use_failure_retries_with_supplied_evidence_only():
     assert len(rag_citations) == 1
     assert team.telemetry.records[0][1]["fallback_used"] is True
     assert team.telemetry.records[0][1]["response_text"] == result.model_dump_json()
+
+
+def test_approved_standards_answer_survives_orchestrator_failure_without_human_review(monkeypatch):
+    team = _team()
+    team.orchestrator = object()
+    team.router_model_name = "groq:test"
+    specialist = SpecialistResult(metrics_summary={"answer": "Separe o vidro por cor antes da reciclagem."})
+    monkeypatch.setattr(
+        team,
+        "_invoke_controller",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("Groq rate limit")),
+    )
+
+    answer = team.format_answer(
+        "standards", specialist, JudgeVerdict(approved=True), question="Como separar vidro?"
+    )
+
+    assert answer.answer == "Separe o vidro por cor antes da reciclagem."
+    assert answer.requires_human_validation is False
+    assert guardrail_saida(answer.answer, requires_human_validation=answer.requires_human_validation) == answer.answer
+
+
+def test_unapproved_standards_answer_does_not_use_orchestrator_fallback(monkeypatch):
+    team = _team()
+    team.orchestrator = object()
+    team.router_model_name = "groq:test"
+    specialist = SpecialistResult(metrics_summary={"answer": "Resposta não validada."})
+    monkeypatch.setattr(
+        team,
+        "_invoke_controller",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("Groq rate limit")),
+    )
+
+    with pytest.raises(RuntimeError, match="Groq rate limit"):
+        team.format_answer("standards", specialist, JudgeVerdict(approved=False))
