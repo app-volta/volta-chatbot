@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import hashlib
 import hmac
 import json
+import logging
 from uuid import UUID, uuid4
 import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -28,8 +29,10 @@ from app.core.observability import Observability
 from app.core.auth import RequestIdentity, get_current_identity
 from app.core.guardrails import guardrail_entrada, guardrail_saida
 from app.core.model_usage import ModelUsage
+from app.core.request_context import log_exception_without_details
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 
 
@@ -312,6 +315,7 @@ async def predict_waste(
     except HTTPException:
         raise
     except Exception as e:
+        log_exception_without_details(logger, f"Visual analysis failed during {phase}", e)
         telemetry.record_agent(
             phase,
             started_at=phase_started,
