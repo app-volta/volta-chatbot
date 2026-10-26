@@ -41,6 +41,10 @@ def _safe_provider_error(exc: Exception) -> tuple[int | None, str | None, str | 
     return None, None, None
 
 
+def provider_error_code(exc: Exception) -> str | None:
+    return _safe_provider_error(exc)[2]
+
+
 def log_exception_without_details(
     logger: logging.Logger,
     message: str,

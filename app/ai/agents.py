@@ -19,7 +19,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_groq import ChatGroq
 from pydantic import BaseModel
 
-from app.core.request_context import log_exception_without_details
+from app.core.request_context import log_exception_without_details, provider_error_code
 from app.core.config import Settings
 from app.ai.multi_rag import FederatedRag, serialize_citations
 from app.core.observability import Observability
@@ -303,6 +303,15 @@ class AgentTeam:
             name: _build_specialist(prompt_text, tools, self._specialist_fallback_model)
             for name, (prompt_text, tools) in specialist_specs.items()
         } if self._specialist_fallback_model is not None else {}
+        self._specialist_no_tools_fallback_agents = {
+            name: _build_specialist(
+                f"{prompt_text}\n\nCONTINGÊNCIA: ferramentas externas indisponíveis. Use somente as evidências e os dados "
+                "já presentes na mensagem. Não afirme que consultou fontes externas; se faltar evidência, informe isso.",
+                [],
+                self._specialist_fallback_model,
+            )
+            for name, (prompt_text, _tools) in specialist_specs.items()
+        } if self._specialist_fallback_model is not None else {}
 
     @contextmanager
     def collect_norm_citations(self):
@@ -342,6 +351,7 @@ class AgentTeam:
         *,
         fallback_executor: Any | None = None,
         fallback_model: str | None = None,
+        fallback_no_tools_executor: Any | None = None,
     ) -> SpecialistResult:
         started = self.telemetry.timer()
         usage = ModelUsage(model)
@@ -417,12 +427,33 @@ class AgentTeam:
             try:
                 parsed = invoke(fallback_executor, fallback_usage, fallback=True)
             except Exception as fallback_exc:
-                log_exception_without_details(logger, f"Fallback specialist {name} failed", fallback_exc)
-                self.telemetry.record_agent(
-                    name, started_at=started, prompt_text=payload, response_text="",
-                    failed=True, **usage_details(fallback_usage),
+                if fallback_no_tools_executor is None or provider_error_code(fallback_exc) != "tool_use_failed":
+                    log_exception_without_details(logger, f"Fallback specialist {name} failed", fallback_exc)
+                    self.telemetry.record_agent(
+                        name, started_at=started, prompt_text=payload, response_text="",
+                        failed=True, **usage_details(fallback_usage),
+                    )
+                    raise RuntimeError(f"Falha controlada no especialista {name}.") from fallback_exc
+
+                log_exception_without_details(
+                    logger,
+                    f"Groq tool call failed for specialist {name}; retrying with supplied evidence only",
+                    fallback_exc,
+                    level=logging.WARNING,
                 )
-                raise RuntimeError(f"Falha controlada no especialista {name}.") from fallback_exc
+                if citation_sink is not None:
+                    del citation_sink[citation_count:]
+                if rag_citation_sink is not None:
+                    del rag_citation_sink[rag_citation_count:]
+                try:
+                    parsed = invoke(fallback_no_tools_executor, fallback_usage, fallback=True)
+                except Exception as no_tools_exc:
+                    log_exception_without_details(logger, f"Tool-free fallback specialist {name} failed", no_tools_exc)
+                    self.telemetry.record_agent(
+                        name, started_at=started, prompt_text=payload, response_text="",
+                        failed=True, **usage_details(fallback_usage),
+                    )
+                    raise RuntimeError(f"Falha controlada no especialista {name}.") from no_tools_exc
 
             self.telemetry.record_agent(
                 name, started_at=started, prompt_text=payload,
@@ -456,6 +487,7 @@ class AgentTeam:
             json.dumps(context, ensure_ascii=False, default=str),
             fallback_executor=self._specialist_fallback_agents.get(route),
             fallback_model=f"groq:{self.settings.groq_router_model}" if self._specialist_fallback_model else None,
+            fallback_no_tools_executor=self._specialist_no_tools_fallback_agents.get(route),
         )
 
     def judge_result(
