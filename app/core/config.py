@@ -23,7 +23,7 @@ class Settings(BaseSettings):
         return origins
 
     gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     groq_api_key: SecretStr | None = None
     groq_router_model: str = "openai/gpt-oss-120b"
 
