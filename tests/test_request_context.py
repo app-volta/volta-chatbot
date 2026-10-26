@@ -1,6 +1,6 @@
 import logging
 
-from app.core.request_context import log_exception_without_details
+from app.core.request_context import log_exception_without_details, provider_error_code
 
 
 def test_exception_logging_keeps_traceback_without_exception_message(caplog):
@@ -44,3 +44,17 @@ def test_provider_logging_keeps_safe_error_metadata_only(caplog):
     assert "provider_error_code=tool_use_failed" in caplog.text
     assert "sensitive provider response body" not in caplog.text
     assert "sensitive exception text" not in caplog.text
+
+
+def test_provider_error_code_extracts_wrapped_groq_tool_error():
+    class ProviderError(Exception):
+        status_code = 400
+        body = {"error": {"code": "tool_use_failed", "message": "sensitive response"}}
+
+    try:
+        raise ProviderError("sensitive exception")
+    except ProviderError as exc:
+        try:
+            raise RuntimeError("wrapped") from exc
+        except RuntimeError as wrapped:
+            assert provider_error_code(wrapped) == "tool_use_failed"

@@ -166,3 +166,42 @@ def test_failed_primary_parser_restarts_with_groq_json_schema():
     assert result == expected
     assert team._specialist_fallback_model.methods == ["json_schema"]
     assert fallback.input == {"messages": [("user", payload)]}
+
+
+def test_groq_tool_use_failure_retries_with_supplied_evidence_only():
+    team = _team()
+    citations = [object()]
+    rag_citations = [object()]
+    team._norm_citation_sink.set(citations)
+    team._rag_citation_sink.set(rag_citations)
+    payload = '{"question":"vidro","evidence":[{"excerpt":"Lavar e secar."}]}'
+
+    class ToolUseFailed(Exception):
+        status_code = 400
+        body = {"error": {"code": "tool_use_failed"}}
+
+    primary = FakeExecutor(failure=RuntimeError("Gemini quota exceeded"))
+    fallback = FakeExecutor(
+        failure=ToolUseFailed("provider response intentionally omitted"),
+        before=lambda: (citations.append(object()), rag_citations.append(object())),
+    )
+    no_tools_fallback = FakeExecutor(
+        SpecialistResult(metrics_summary={"answer": "Use apenas a evidência fornecida."}).model_dump_json()
+    )
+
+    result = team._invoke_specialist(
+        "standards",
+        primary,
+        "gemini:test",
+        payload,
+        fallback_executor=fallback,
+        fallback_model="groq:test",
+        fallback_no_tools_executor=no_tools_fallback,
+    )
+
+    assert result.metrics_summary == {"answer": "Use apenas a evidência fornecida."}
+    assert fallback.input == no_tools_fallback.input == {"messages": [("user", payload)]}
+    assert len(citations) == 1
+    assert len(rag_citations) == 1
+    assert team.telemetry.records[0][1]["fallback_used"] is True
+    assert team.telemetry.records[0][1]["response_text"] == result.model_dump_json()
