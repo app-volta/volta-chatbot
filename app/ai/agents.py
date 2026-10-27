@@ -538,4 +538,24 @@ class AgentTeam:
         question: str | None = None,
     ) -> CorporateAnswer:
         context = {"route": route, "question": question, "specialist": specialist.model_dump(mode="json") if specialist else None, "judge": judge.model_dump(mode="json") if judge else None, "direct_reply": direct_reply}
-        return self._invoke_controller("orchestrator", self.orchestrator, self.router_model_name, json.dumps(context, ensure_ascii=False, default=str))
+        try:
+            return self._invoke_controller(
+                "orchestrator",
+                self.orchestrator,
+                self.router_model_name,
+                json.dumps(context, ensure_ascii=False, default=str),
+            )
+        except RuntimeError:
+            answer = (specialist.metrics_summary or {}).get("answer") if specialist else None
+            if (
+                route != "standards"
+                or judge is None
+                or not judge.approved
+                or not isinstance(answer, str)
+                or not answer.strip()
+            ):
+                raise
+            logger.warning(
+                "Orchestrator failed after judge approved standards response; returning validated specialist answer"
+            )
+            return CorporateAnswer(answer=answer.strip(), requires_human_validation=False)
