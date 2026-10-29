@@ -121,6 +121,22 @@ def test_rejected_visual_judge_suppresses_unverified_claims():
     assert result.requires_human_validation is True
 
 
+def test_approved_visual_weight_estimate_is_preserved():
+    identity = RequestIdentity(TENANT, USER)
+    analysis = _analysis().model_copy(update={
+        "estimated_quantity_kg": 5.5,
+        "report_text": "Peso aproximado de 5,5 kg, sujeito a confirmação por pesagem.",
+    })
+
+    result = occurrences._finalize_visual_analysis(
+        analysis, JudgeVerdict(approved=True), identity, "provenance-test"
+    )
+
+    assert result.estimated_quantity_kg == 5.5
+    assert "aproximado" in result.report_text
+    assert occurrences._has_valid_visual_provenance(result, identity, "provenance-test")
+
+
 def test_draft_requires_untampered_server_provenance(monkeypatch):
     monkeypatch.setattr(occurrences, "get_settings", _settings)
     identity = RequestIdentity(TENANT, USER)

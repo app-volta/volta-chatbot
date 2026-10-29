@@ -90,7 +90,7 @@ class AnaliseResiduoIA(BaseModel):
     estimated_quantity_kg: float | None = Field(
         None,
         ge=0,
-        description="Estimativa visual de peso em kg. Se não for possível deduzir pela imagem, retorne null."
+        description="Peso total aproximado em kg, somente quando sustentado por dados visíveis. Caso contrário, null."
     )
     recommendations: str = Field(
         description="Passo a passo de segurança para manuseio, EPIs necessários e qual o descarte correto."
