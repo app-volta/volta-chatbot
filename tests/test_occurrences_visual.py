@@ -4,7 +4,7 @@ from uuid import UUID
 
 import pytest
 from fastapi import HTTPException
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 from starlette.datastructures import Headers, UploadFile
 
 from app.api import occurrences
@@ -108,7 +108,7 @@ def test_visual_prediction_is_judged_guarded_and_signed(monkeypatch):
 def test_rejected_visual_judge_suppresses_unverified_claims():
     identity = RequestIdentity(TENANT, USER)
     result = occurrences._finalize_visual_analysis(
-        _analysis().model_copy(update={"estimated_quantity_kg": 300}),
+        _analysis().model_copy(update={"estimated_quantity_kg": 300, "waste_types": ["metal"], "item_count": 2, "suggested_priority": "HIGH"}),
         JudgeVerdict(approved=False, reason="Peso sem escala visual."),
         identity,
         "provenance-test",
@@ -117,8 +117,55 @@ def test_rejected_visual_judge_suppresses_unverified_claims():
     assert result.detected_waste_type == "Não confirmado pelo juiz"
     assert result.ai_contamination_level == "INDETERMINADO"
     assert result.estimated_quantity_kg is None
+    assert result.waste_types == []
+    assert result.item_count is None
+    assert result.suggested_priority is None
     assert result.judge and result.judge.approved is False
     assert result.requires_human_validation is True
+
+
+def test_visual_structured_fields_and_provenance():
+    identity = RequestIdentity(TENANT, USER)
+    analysis = _analysis().model_copy(update={"waste_types": ["papelao", "plastico"], "item_count": 3, "suggested_priority": "HIGH"})
+    result = occurrences._finalize_visual_analysis(analysis, JudgeVerdict(approved=True), identity, "secret")
+    assert result.waste_types == ["papelao", "plastico"]
+    assert result.item_count == 3
+    assert result.suggested_priority == "HIGH"
+    assert occurrences._has_valid_visual_provenance(result, identity, "secret")
+    tampered = result.model_copy(update={"item_count": 4})
+    assert not occurrences._has_valid_visual_provenance(tampered, identity, "secret")
+
+
+def test_legacy_visual_signature_and_omitted_new_fields():
+    identity = RequestIdentity(TENANT, USER)
+    result = occurrences._finalize_visual_analysis(_analysis(), JudgeVerdict(approved=True), identity, "secret")
+    old_data = result.model_dump(exclude={"waste_types", "item_count", "suggested_priority"})
+    old_data["provenance_token"] = occurrences._sign_visual_analysis(result, identity, "secret", legacy=True)
+    assert occurrences._has_valid_visual_provenance(AnaliseResiduoIA(**old_data), identity, "secret")
+    old_data["item_count"] = 3
+    assert not occurrences._has_valid_visual_provenance(AnaliseResiduoIA(**old_data), identity, "secret")
+
+
+def test_invalid_visual_types_rejected():
+    for types in (["nenhum", "metal"], ["metal", "metal"], ["nao_reciclavel"]):
+        with pytest.raises(ValidationError):
+            AnaliseResiduoIA(**_analysis().model_dump(exclude={"waste_types"}), waste_types=types)
+
+
+def test_unknown_contamination_is_not_presented_as_a_valid_level():
+    result = occurrences._finalize_visual_analysis(
+        _analysis().model_copy(update={"ai_contamination_level": "desconhecido"}),
+        JudgeVerdict(approved=True), RequestIdentity(TENANT, USER), "secret",
+    )
+    assert result.ai_contamination_level == "INDETERMINADO"
+
+
+def test_accented_contamination_is_normalized():
+    result = occurrences._finalize_visual_analysis(
+        _analysis().model_copy(update={"ai_contamination_level": "médio"}),
+        JudgeVerdict(approved=True), RequestIdentity(TENANT, USER), "secret",
+    )
+    assert result.ai_contamination_level == "MEDIO"
 
 
 def test_approved_visual_weight_estimate_is_preserved():
