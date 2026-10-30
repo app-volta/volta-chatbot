@@ -84,6 +84,14 @@ class AnaliseResiduoIA(BaseModel):
     detected_waste_type: str = Field(
         description="O tipo de resíduo identificado na imagem (ex: Papelão contaminado, Óleo lubrificante, Plástico reciclável)."
     )
+    waste_types: list[Literal["papelao", "plastico", "metal", "vidro", "madeira", "organico", "outro", "nenhum"]] = Field(
+        default_factory=list,
+        description="Tipos identificados em ordem, com o principal primeiro. Use ['nenhum'] quando claramente não houver resíduo; [] se inconclusivo."
+    )
+    item_count: int | None = Field(default=None, ge=0, description="Número de itens visíveis; null se não for possível contar.")
+    suggested_priority: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = Field(
+        default=None, description="Prioridade sugerida sujeita à validação humana; null quando indeterminada."
+    )
     ai_contamination_level: str = Field(
         description="Nível de contaminação estimado: 'BAIXO', 'MEDIO' ou 'ALTO'."
     )
@@ -106,6 +114,13 @@ class AnaliseResiduoIA(BaseModel):
     analysis_id: UUID | None = None
     generated_at: datetime | None = None
     provenance_token: str | None = Field(default=None, repr=False)
+
+    @field_validator("waste_types")
+    @classmethod
+    def validate_waste_types(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or ("nenhum" in value and len(value) != 1):
+            raise ValueError("Tipos duplicados ou 'nenhum' combinado com outros tipos.")
+        return value
 
     @field_validator("mobile_summary")
     @classmethod
