@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 import anyio
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from app.ai.predictive import prever_volume_futuro
+from app.ai.visual_weight import VisualWeightAnalysis, calculate_visual_weight
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage
 # Nossos modelos Pydantic centralizados
@@ -257,7 +258,7 @@ async def predict_waste(
         )
 
         # 4. Forca a saida no formato do Pydantic
-        structured_llm = llm.with_structured_output(AnaliseResiduoIA)
+        structured_llm = llm.with_structured_output(VisualWeightAnalysis)
 
         # 5. Monta o prompt + foto
         mensagem = HumanMessage(
@@ -266,6 +267,8 @@ async def predict_waste(
                     "type": "text", 
                     "text": (
                         "Voce e um auditor ambiental (ESG) linha dura. Analise este residuo industrial. "
+                        "Para estimativa por densidade, preencha volume_liters em litros somente quando a foto permitir estimar o volume ocupado usando uma referencia visual explicita em volume_reference; caso contrario, null. "
+                        "density_case deve ser flattened_cardboard para papelao ondulado achatado, loose_pet_hdpe_bottles para mistura de garrafas PET e HDPE soltas, ou food_waste para residuo alimentar; caso nao seja possivel identificar especificamente, null. Nunca suponha o conteudo de saco fechado. "
                         "Em waste_types use apenas papelao, plastico, metal, vidro, madeira, organico, outro ou nenhum; "
                         "liste o tipo principal primeiro, sem duplicatas; use nenhum sozinho somente se claramente nao houver "
                         "residuo e uma lista vazia se a imagem for inconclusiva. Mantenha detected_waste_type coerente "
@@ -279,7 +282,7 @@ async def predict_waste(
                         "legivel ou referencias suficientes de quantidade, dimensoes e composicao para sustentar "
                         "uma estimativa aproximada, informe o peso em kg e explique no relatorio a referencia "
                         "usada e a incerteza; a estimativa nao substitui pesagem. Se nao houver dados suficientes, "
-                        "use null e explique que o peso nao foi identificado. Em equipamentos como extintores, "
+                        "use null; apenas diga que o peso nao foi identificado se tambem nao houver volume_liters, volume_reference e density_case. Em equipamentos como extintores, "
                         "nao confunda capacidade ou massa da carga com peso total, e nao suponha o conteudo. "
                         "Descreva EPIs e proximos passos como "
                         "recomendacoes sujeitas a validacao humana."
@@ -294,7 +297,7 @@ async def predict_waste(
 
         # 6. Primeira análise visual estruturada.
         phase_usage = ModelUsage(model_name)
-        resultado = await structured_llm.ainvoke([mensagem], config={"callbacks": [phase_usage]})
+        resultado = calculate_visual_weight(await structured_llm.ainvoke([mensagem], config={"callbacks": [phase_usage]}))
         telemetry.record_agent(
             "visual_triage",
             started_at=started,
