@@ -8,6 +8,7 @@ from pydantic import SecretStr, ValidationError
 from starlette.datastructures import Headers, UploadFile
 
 from app.api import occurrences
+from app.ai.visual_weight import EPA_SOURCE, VisualWeightAnalysis, calculate_visual_weight
 from app.core.auth import RequestIdentity
 from app.core.config import Settings
 from app.db.models import AnaliseResiduoIA, JudgeVerdict, OccurrenceDraftCreate
@@ -30,6 +31,38 @@ def _analysis() -> AnaliseResiduoIA:
     )
 
 
+@pytest.mark.parametrize(("case", "waste", "expected"), [
+    ("flattened_cardboard", "papelao", 6.29),
+    ("loose_pet_hdpe_bottles", "plastico", 1.90),
+    ("food_waste", "organico", 27.47),
+])
+def test_visual_weight_uses_matching_epa_factor(case, waste, expected):
+    data = _analysis().model_dump()
+    data.update(waste_types=[waste], volume_liters=100, volume_reference="caixa de 100 litros identificada", density_case=case)
+    result = calculate_visual_weight(VisualWeightAnalysis(**data))
+    assert result.estimated_quantity_kg == expected
+    assert "EPA" in result.report_text
+
+
+@pytest.mark.parametrize("changes", [
+    {"volume_liters": None},
+    {"volume_reference": None},
+    {"waste_types": ["outro"]},
+    {"waste_types": ["papelao", "plastico"]},
+])
+def test_visual_weight_does_not_infer_when_evidence_is_missing(changes):
+    data = _analysis().model_dump()
+    data.update(waste_types=["papelao"], volume_liters=100, volume_reference="referência visível", density_case="flattened_cardboard")
+    data.update(changes)
+    assert calculate_visual_weight(VisualWeightAnalysis(**data)).estimated_quantity_kg is None
+
+
+@pytest.mark.parametrize("volume", [-1, 0, float("inf"), float("nan")])
+def test_visual_weight_rejects_invalid_volume(volume):
+    with pytest.raises(ValidationError):
+        VisualWeightAnalysis(**_analysis().model_dump(), volume_liters=volume)
+
+
 class FakeTelemetry:
     def __init__(self):
         self.agents = []
@@ -47,8 +80,8 @@ class FakeStructuredModel:
         self.schema = schema
 
     async def ainvoke(self, _messages, **_kwargs):
-        if self.schema is AnaliseResiduoIA:
-            return _analysis()
+        if self.schema is VisualWeightAnalysis:
+            return VisualWeightAnalysis(**_analysis().model_dump())
         if self.schema is JudgeVerdict:
             return JudgeVerdict(approved=True, reason="Afirmações limitadas ao conteúdo visível.")
         raise AssertionError(f"Schema inesperado: {self.schema}")
@@ -103,6 +136,33 @@ def test_visual_prediction_is_judged_guarded_and_signed(monkeypatch):
         _settings().jwt_key.get_secret_value(),
     )
     assert telemetry.agents == ["visual_triage", "visual_judge"]
+
+
+def test_calculated_weight_reaches_judge_and_signed_response(monkeypatch):
+    judge_inputs = []
+
+    class StructuredModel(FakeStructuredModel):
+        async def ainvoke(self, messages, **kwargs):
+            if self.schema is VisualWeightAnalysis:
+                data = _analysis().model_dump()
+                data.update(waste_types=["papelao"], volume_liters=100, volume_reference="caixa de 100 litros", density_case="flattened_cardboard")
+                return VisualWeightAnalysis(**data)
+            judge_inputs.append(messages[0].content[0]["text"])
+            return JudgeVerdict(approved=True)
+
+    class Model(FakeModel):
+        def with_structured_output(self, schema):
+            return StructuredModel(schema)
+
+    monkeypatch.setattr(occurrences, "get_settings", _settings)
+    monkeypatch.setattr(occurrences, "ChatGoogleGenerativeAI", Model)
+    identity = RequestIdentity(TENANT, USER)
+    upload = UploadFile(BytesIO(b"fake-image"), filename="residuo.png", headers=Headers({"content-type": "image/png"}))
+    result = asyncio.run(occurrences.predict_waste(upload, identity, FakeTelemetry()))
+    assert '"estimated_quantity_kg":6.29' in judge_inputs[0]
+    assert result.estimated_quantity_kg == 6.29
+    assert EPA_SOURCE in result.report_text
+    assert occurrences._has_valid_visual_provenance(result, identity, "provenance-test")
 
 
 def test_rejected_visual_judge_suppresses_unverified_claims():
