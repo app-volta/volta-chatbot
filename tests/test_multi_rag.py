@@ -34,7 +34,7 @@ class ConstantEmbeddings(Embeddings):
         return [1.0, 1.0]
 
 
-@pytest.mark.parametrize("corpus", ["operational", "regulatory", "cooperatives", "history"])
+@pytest.mark.parametrize("corpus", ["operational", "regulatory", "cooperatives", "history", "weight"])
 def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp_path, corpus):
     settings = Settings(
         _env_file=None,
