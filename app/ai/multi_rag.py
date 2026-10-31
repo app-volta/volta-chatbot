@@ -27,8 +27,8 @@ from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, P
 from app.core.config import Settings
 from app.db.models import SourceCitation
 
-Corpus = Literal["operational", "regulatory", "cooperatives", "history"]
-CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history")
+Corpus = Literal["operational", "regulatory", "cooperatives", "history", "weight"]
+CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history", "weight")
 logger = logging.getLogger(__name__)
 
 

@@ -21,7 +21,7 @@ class RouteName(str, Enum):
 class SourceCitation(BaseModel):
     source_id: str
     title: str
-    corpus: Literal["operational", "regulatory", "cooperatives", "history"]
+    corpus: Literal["operational", "regulatory", "cooperatives", "history", "weight"]
     internal_document: bool = False
     location: str | None = None
     url: str | None = None

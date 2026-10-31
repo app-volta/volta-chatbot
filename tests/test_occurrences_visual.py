@@ -11,7 +11,7 @@ from app.api import occurrences
 from app.ai.visual_weight import EPA_SOURCE, VisualWeightAnalysis, calculate_visual_weight
 from app.core.auth import RequestIdentity
 from app.core.config import Settings
-from app.db.models import AnaliseResiduoIA, JudgeVerdict, OccurrenceDraftCreate
+from app.db.models import AnaliseResiduoIA, JudgeVerdict, OccurrenceDraftCreate, SourceCitation
 from app.db.storage import DuplicateAnalysisError
 
 
@@ -29,6 +29,35 @@ def _analysis() -> AnaliseResiduoIA:
         report_text="Material compatível visualmente com papelão.",
         mobile_summary="Possível papelão; aguarde validação técnica.",
     )
+
+
+def test_weight_rag_filters_other_sources_and_survives_failure():
+    class Rag:
+        def retrieve(self, corpus, query, k):
+            assert corpus == "weight"
+            return [
+                SourceCitation(source_id="1", title="EPA", corpus="weight", url=next(iter(occurrences.WEIGHT_REFERENCE_URLS)), excerpt="fator e unidade"),
+                SourceCitation(source_id="2", title="Outra", corpus="weight", url="https://example.com", excerpt="irrelevante"),
+            ]
+
+    result = asyncio.run(occurrences._weight_evidence(Rag()))
+    assert "fator e unidade" in result
+    assert "irrelevante" not in result
+
+    class BrokenRag:
+        def retrieve(self, *args, **kwargs):
+            raise RuntimeError("unavailable")
+
+    assert asyncio.run(occurrences._weight_evidence(BrokenRag())) == "[]"
+
+
+def test_missing_weight_references_is_visible(caplog):
+    class EmptyRag:
+        def retrieve(self, *args, **kwargs):
+            return []
+
+    assert asyncio.run(occurrences._weight_evidence(EmptyRag())) == "[]"
+    assert "Nenhuma referência de peso recuperada" in caplog.text
 
 
 @pytest.mark.parametrize(("case", "waste", "expected"), [
@@ -136,6 +165,30 @@ def test_visual_prediction_is_judged_guarded_and_signed(monkeypatch):
         _settings().jwt_key.get_secret_value(),
     )
     assert telemetry.agents == ["visual_triage", "visual_judge"]
+
+
+def test_weight_rag_reaches_visual_specialist_and_judge(monkeypatch):
+    prompts = []
+
+    class StructuredModel(FakeStructuredModel):
+        async def ainvoke(self, messages, **kwargs):
+            prompts.append(messages[0].content[0]["text"])
+            return await super().ainvoke(messages, **kwargs)
+
+    class Model(FakeModel):
+        def with_structured_output(self, schema):
+            return StructuredModel(schema)
+
+    class Rag:
+        def retrieve(self, corpus, query, k):
+            return [SourceCitation(source_id="1", title="EPA", corpus="weight", url=next(iter(occurrences.WEIGHT_REFERENCE_URLS)), excerpt="referencia densidade")]
+
+    monkeypatch.setattr(occurrences, "get_settings", _settings)
+    monkeypatch.setattr(occurrences, "ChatGoogleGenerativeAI", Model)
+    upload = UploadFile(BytesIO(b"fake-image"), filename="residuo.png", headers=Headers({"content-type": "image/png"}))
+    asyncio.run(occurrences.predict_waste(upload, RequestIdentity(TENANT, USER), FakeTelemetry(), Rag()))
+    assert len(prompts) == 2
+    assert all("referencia densidade" in prompt for prompt in prompts)
 
 
 def test_calculated_weight_reaches_judge_and_signed_response(monkeypatch):

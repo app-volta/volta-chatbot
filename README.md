@@ -102,6 +102,8 @@ O manual interno VOLTA foi removido da árvore atual e não entra em novas image
 
 ### Ingestao local
 
+Para disponibilizar as referências públicas da EPA e de Minnesota à análise visual, configure o ambiente de destino e execute `python -m scripts.ingest_weight_references`. O comando baixa os dois PDFs oficiais e indexa suas páginas no corpus `weight`, preservando fonte e página. Execute-o apenas no ambiente desejado e verifique a recuperação após a ingestão. O endpoint visual consulta esse corpus antes de chamar o modelo, com uma busca geral; se estiver indisponível, continua sem as referências. Os trechos são apenas contexto: a extração de tabelas pode separar valores das unidades. O RAG não comprova o volume nem o conteúdo da foto, e os fatores experimentais fixos continuam restritos às condições explicitamente previstas.
+
 Coloque arquivos `.pdf`, `.txt` ou `.md` em um diretorio por corpus e execute:
 
 ```bash
