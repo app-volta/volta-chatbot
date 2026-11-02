@@ -22,63 +22,72 @@ O VOLTA não é marketplace, e-commerce nem aplicativo genérico de reciclagem.
 
 ~~~mermaid
 flowchart LR
-    U[Usuário] --> API[FastAPI]
-    API --> GI[Guardrail de entrada]
+    U[Usuário no web ou mobile] --> API[FastAPI do chatbot]
+    API --> CHAT[Chat: LangGraph]
+    CHAT --> GI[Guardrail de entrada]
     GI --> R[Roteador]
+    GI -->|bloqueado| B[Resposta de bloqueio]
     R --> T[Triagem]
-    R --> N[Normas e FISPQs]
-    R --> D[Dados e BI]
+    R --> N[Normas]
+    R --> D[Dados]
     R --> P[Performance]
-    T --> RAG[(Qdrant ou FAISS federado)]
-    D --> SQL
-    P --> SQL
-    SQL --> PR[Modelo preditivo]
-    N --> RAG[(Qdrant ou FAISS federado)]
-    N --> MCP[MCP de normas externas]
-    MCP --> MMA[Catálogo público do MMA]
-    T --> J[Agente juiz]
-    N --> J
-    D --> J
-    P --> J
-    J --> O[Orquestrador]
-    O --> GO[Guardrail de saída]
+    R -->|resposta direta| O[Orquestrador]
+    R -->|bloqueado| B
+    T & N & D & P --> J[Juiz]
+    J --> O
+    O & B --> GO[Guardrail de saída]
     GO --> API
+    API --> V[Análise visual de ocorrência]
+    V --> VP[Triagem visual Gemini]
+    VP --> CALC[Cálculo opcional: fatores EPA]
+    CALC --> VJ[Juiz visual Gemini]
+    VJ --> VS[Guardrail e assinatura]
+    VS --> API
+    RAG[(Qdrant ou FAISS: RAG)] -. contexto .-> T & N & D & P
+    RAG -. corpus de peso, quando indexado .-> V
+    N -. consulta .-> MCP[MCP de normas] --> MMA[Catálogo público do MMA]
+    D & P -. consultas .-> SQL[(PostgreSQL)]
+    API -. identidade .-> SQL
     API <--> M[(MongoDB: sessões e checkpoints)]
+    M -. resumo ao encerrar sessão .-> RAG
+    CHAT -. tracing opcional e sanitizado .-> LS[LangSmith]
 ~~~
+
+O fluxo visual é separado do grafo textual. As rotas direta e bloqueada não passam pelos especialistas e pelo juiz. O RAG de peso depende da ingestão prévia das fontes; os trechos recuperados são contexto, não fatores numéricos automáticos. A validação humana permanece uma responsabilidade operacional, não uma etapa automática do diagrama. O modelo de previsão de capacidade é exposto por um endpoint separado e não faz parte do grafo do chat.
 
 ### Fluxo de uma requisição
 
-1. A API de chat recebe session_id e mensagem de texto; imagens usam `/v1/occurrences/predict`. Usuário e tenant vêm do JWT validado.
-2. O guardrail de entrada remove ou mapeia PII e bloqueia padrões de prompt injection.
-3. O roteador escolhe uma única rota: triagem, normas, dados, performance ou fora_escopo.
-4. O especialista executa suas ferramentas e devolve um resultado estruturado.
-5. O agente juiz verifica consistência, evidências e aderência ao escopo.
-6. O orquestrador transforma o JSON interno em uma resposta corporativa.
-7. O guardrail de saída remove PII residual e acrescenta a ressalva quando `requires_human_validation` está ativo. A rota `triage` sempre ativa o sinalizador; `direct` e `blocked` não o ativam. Nas rotas `standards`, `data` e `performance`, o sinalizador considera a resposta do modelo e a decisão do juiz.
+1. A API de chat recebe `session_id` e mensagem de texto; imagens usam `/v1/occurrences/predict`. O usuário é identificado pelo JWT validado e a empresa é consultada no PostgreSQL.
+2. O guardrail de entrada mascara padrões de dados pessoais conhecidos e bloqueia padrões conhecidos de prompt injection.
+3. O roteador escolhe uma rota: triagem, normas, dados, performance, resposta direta ou bloqueio.
+4. Nas rotas de especialistas, o agente executa suas ferramentas e devolve um resultado estruturado; as rotas direta e bloqueada seguem sem especialista e juiz.
+5. Nas rotas de especialistas, o juiz avalia consistência, evidências e aderência ao escopo.
+6. O orquestrador organiza a resposta nas rotas de especialistas e na rota direta; bloqueios seguem diretamente à saída.
+7. O guardrail de saída mascara padrões conhecidos de dados pessoais e acrescenta a ressalva quando `requires_human_validation` está ativo. A rota `triage` sempre ativa o sinalizador; `direct` e `blocked` não o ativam. Em `standards`, o sinalizador vem da resposta; em `data` e `performance`, considera também a decisão do juiz.
 8. A sessão e os checkpoints do LangGraph são persistidos no MongoDB.
 
 ## Agentes
 
 | Agente | Responsabilidade | Recursos |
 | --- | --- | --- |
-| Roteador | Classificar intenção e encaminhar a mensagem original | Llama via Groq |
-| Triagem | Analisar relato textual e sugerir categoria, risco e higienização | Gemini, RAG operacional |
-| Normas e documentação | Responder dúvidas explicativas sobre resíduos, funcionamento do VOLTA, FISPQs, manuais, legislação e ODS 12 | Gemini, RAG federado, MCP do catálogo do MMA |
-| Dados e BI | Converter perguntas em consultas de métricas e históricos | Gemini, PostgreSQL |
-| Performance | Avaliar conclusão das coletas e tempo de resposta | Gemini, PostgreSQL |
-| Juiz | Revisar o resultado do especialista e detectar afirmações sem suporte | Gemini |
-| Orquestrador | Unificar formato, tom e próximos passos | Llama/Gemini |
+| Roteador | Classificar intenção e encaminhar a mensagem original | Groq, com Gemini como alternativa configurável |
+| Triagem | Analisar relato textual e sugerir categoria, risco e higienização | Modelo especialista, RAG operacional |
+| Normas e documentação | Responder dúvidas explicativas sobre resíduos, funcionamento do VOLTA, FISPQs, manuais, legislação e ODS 12 | Modelo especialista, RAG federado, MCP do catálogo do MMA |
+| Dados e BI | Converter perguntas em consultas de métricas e históricos | Modelo especialista, PostgreSQL |
+| Performance | Avaliar conclusão das coletas e tempo de resposta | Modelo especialista, PostgreSQL |
+| Juiz | Revisar o resultado do especialista e detectar afirmações sem suporte | Modelo especialista |
+| Orquestrador | Unificar formato, tom e próximos passos | Groq ou Gemini, conforme configuração |
 
-O roteador emite a decisão de rota. A triagem de texto usa RAG operacional; a análise visual passa por endpoint separado, juiz e guardrails.
+O modelo especialista usa Gemini como principal e pode usar Groq como alternativa quando configurado. O roteador emite a decisão de rota. A triagem de texto usa RAG operacional; a análise visual passa por endpoint separado, juiz e guardrails.
 
 ## Contratos estruturados
 
 Os agentes se comunicam por objetos Pydantic, evitando dependência de texto livre:
 
-- RouteDecision: rota escolhida, justificativa e pergunta original;
-- SpecialistResult: análise de triagem, resumo de métricas, proposta de ocorrência e fontes;
+- RouteDecision: rota escolhida, justificativa e resposta direta opcional;
+- SpecialistResult: análise de triagem, resumo de métricas e proposta de ocorrência;
 - JudgeVerdict: aprovação ou reprovação da resposta e justificativa;
-- CorporateAnswer: título, resposta final, ações recomendadas e fontes;
+- CorporateAnswer: título, resposta final, ações recomendadas e indicador de validação humana; as citações são retornadas separadamente no ChatResponse;
 - ChatRequest: sessão e mensagem de texto; usuário e empresa vêm do JWT validado. A imagem é enviada em `/v1/occurrences/predict`.
 
 Uma ocorrência criada pela IA é sempre uma proposta ou rascunho. O status inicial deve permanecer AGUARDANDO_VALIDACAO até a aprovação de um responsável.
@@ -91,10 +100,11 @@ O módulo app/ai/multi_rag.py separa os contextos para reduzir mistura de fontes
 2. Regulatório/ESG: legislação, políticas internas e ODS 12.
 3. Cooperativas: contratos, regras de coleta e níveis de serviço.
 4. Histórico: resumos privados de conversas do próprio usuário; não são fontes normativas nem ocorrências validadas.
+5. Peso: referências de conversão de volume em massa para apoiar a análise visual, quando indexadas.
 
 Os metadados de origem e os trechos são mantidos para fundamentar e avaliar as respostas. Para o PDF interno `volta.pdf`, esses metadados não são enviados aos agentes nem retornados nas citações da API; somente o conteúdo recuperado pode fundamentar a resposta ao cliente. Citações de outras fontes continuam sujeitas ao contrato normal da API. Perguntas explicativas sobre documentação e funcionamento do VOLTA usam a rota `standards`; relatos de ocorrências concretas usam `triage`. O agente de Normas e Documentação usa as evidências do RAG e pode pesquisar legislação externa pelo MCP; quando não houver evidência suficiente, deve declarar a limitação e solicitar validação.
 
-A indexação usa Qdrant nos ambientes QA e produção; FAISS local é fallback para desenvolvimento. No início da aplicação, os corpora estáticos `operational`, `regulatory` e `cooperatives` são verificados: coleções/índices ausentes ou vazios geram avisos no log, sem registrar credenciais ou conteúdo. Coleções ausentes continuam retornando nenhuma fonte; o aviso torna essa condição visível, mas não substitui a conferência de ingestão no ambiente. Memórias de conversa exigem correspondência de empresa e usuário; os demais corpora são referências compartilhadas. Documentos reais com informação interna ou sensível não devem ser versionados.
+O RAG usa Qdrant quando configurado; FAISS local é uma opção para desenvolvimento. No início da aplicação, os corpora estáticos `operational`, `regulatory` e `cooperatives` são verificados: coleções/índices ausentes ou vazios geram avisos no log, sem registrar credenciais ou conteúdo. Coleções ausentes continuam retornando nenhuma fonte; o aviso torna essa condição visível, mas não substitui a conferência de ingestão no ambiente. Memórias de conversa exigem correspondência de empresa e usuário; os demais corpora são referências compartilhadas. Documentos reais com informação interna ou sensível não devem ser versionados.
 
 Em QA e produção, configure `QDRANT_URL` e, quando o cluster exigir autenticação, `QDRANT_API_KEY` nos secrets do ambiente. A ingestão usa `python -m scripts.ingest_rag --corpus <corpus> --directory <diretório>` e deve ser validada com recuperação de conteúdo após a carga. Não empacotamos FAISS nem o manual privado na imagem pública.
 
@@ -159,17 +169,17 @@ O MongoDB guarda o histórico conversacional e o estado do LangGraph. Sessões s
 ### Entrada
 
 - bloqueia tentativas conhecidas de prompt injection;
-- anonimiza PII antes do processamento;
+- mascara padrões conhecidos de dados pessoais antes do processamento;
 - mantém um mapa temporário para a camada autorizada de apresentação;
-- rejeita mensagens fora do escopo industrial quando necessário.
+- o roteador e os prompts orientam o tratamento de mensagens fora do escopo.
 
 ### Saída
 
-- impede que a IA se apresente como autoridade técnica absoluta;
-- ativa `requires_human_validation` sempre em triagem e usa a resposta do modelo e do juiz nas rotas `standards`, `data` e `performance`;
+- atenua padrões conhecidos de afirmações absolutas;
+- ativa `requires_human_validation` em triagem; em `standards`, usa a resposta do modelo, e em `data` e `performance` considera também o resultado do juiz;
 - mantém `requires_human_validation` falso nas rotas `direct` e `blocked`; o prompt orienta o modelo a manter o sinalizador falso para explicações gerais, saudações e redirecionamentos;
-- evita expor PII ou detalhes internos indevidos;
-- mantém resposta objetiva e corporativa.
+- mascara padrões conhecidos de dados pessoais na resposta;
+- orienta respostas objetivas e apropriadas ao contexto.
 
 Guardrails são controles de segurança, não substitutos para autenticação, autorização, auditoria ou revisão técnica.
 
@@ -184,7 +194,7 @@ A aplicação FastAPI expõe atualmente:
 | GET | /health | Alias de readiness |
 | POST | /v1/sessions | Abrir uma sessão |
 | GET | /v1/sessions/{session_id}/history | Recuperar histórico |
-| POST | /v1/sessions/{session_id}/close | Encerrar sessão e indexar resumo privado |
+| POST | /v1/sessions/{session_id}/close | Encerrar sessão e, quando houver mensagens, tentar indexar resumo privado |
 | POST | /v1/chat | Executar o fluxo multiagente |
 | POST | /v1/occurrences/predict | Analisar imagem de resíduo |
 | GET | /v1/occurrences/areas/{area_id}/predict_capacity | Prever volume futuro da área |
@@ -194,22 +204,22 @@ A aplicação FastAPI expõe atualmente:
 | POST | /v1/occurrences/drafts/{id}/approve | Aprovar ocorrência |
 | GET | /v1/observability/summary | Resumo operacional e estimativas |
 | POST | /v1/observability/resolutions | Registrar resolução operacional confirmada |
-| GET | /metrics | Métricas Prometheus |
+| GET | /metrics | Métricas operacionais para coleta externa |
 
 Exemplo de sessão:
 
 ~~~bash
-curl -X POST http://localhost:8000/v1/sessions ^
+curl -X POST http://localhost:8000/v1/sessions \
   -H "Authorization: Bearer <jwt-da-volta-api>"
 ~~~
 
 Exemplo de conversa:
 
 ~~~bash
-curl -X POST http://localhost:8000/v1/chat ^
-  -H "Authorization: Bearer <jwt-da-volta-api>" ^
-  -H "Content-Type: application/json" ^
-  -d "{\"session_id\":\"demo-001\",\"message\":\"Como devo tratar um plástico multicamada contaminado?\"}"
+curl -X POST http://localhost:8000/v1/chat \
+  -H "Authorization: Bearer <jwt-da-volta-api>" \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"<id-retornado-na-criacao-da-sessao>","message":"Como devo tratar um plástico multicamada contaminado?"}'
 ~~~
 
 Em `POST /v1/chat`, `response.requires_human_validation` informa se a resposta demanda validação humana. As citações do PDF interno `volta.pdf` são omitidas da resposta pública; seu conteúdo continua sendo usado para fundamentar o texto. Citações de fontes externas ou de outros corpora podem ser retornadas normalmente.
@@ -270,11 +280,13 @@ uvicorn app.main:app --reload
 
 4. Abra a documentação interativa em http://localhost:8000/docs.
 
+Para o exemplo de MongoDB local, configure um replica set chamado `rs0`, necessário para os checkpoints. Use o ID retornado pela criação da sessão no exemplo de conversa; os comandos `curl` acima usam sintaxe de shell Bash.
+
 Variáveis principais:
 
 ~~~env
 POSTGRES_DSN=postgresql://volta:volta@localhost:5432/volta
-MONGO_URI=mongodb://localhost:27017/volta_memory
+MONGO_URI=mongodb://localhost:27017/volta_memory?replicaSet=rs0
 JWT_KEY=
 GROQ_API_KEY=
 GEMINI_API_KEY=
@@ -303,7 +315,7 @@ Os dados devem permitir acompanhar cenários de 100 a 1.000 usuários semanais s
 
 ### Endpoints de observabilidade
 
-- `GET /metrics`: formato Prometheus para coleta de latência, chamadas, erros, custos, fallbacks e resultados do juiz.
+- `GET /metrics`: métricas operacionais de latência, chamadas, erros, custos, fallbacks e resultados do juiz.
 - `GET /v1/observability/summary?active_users=100&requests_per_user=5`: resumo autenticado de mensagens do chat, latência média, taxa de erro por mensagem e projeção semanal de custo estimado.
 
 O resumo aceita de 100 a 1.000 usuários semanais. Nenhum endpoint de observabilidade retorna o conteúdo das mensagens ou dados pessoais.
@@ -331,17 +343,16 @@ Limites desta etapa:
 - Agentes no resumo incluem outras rotas de IA; o bloco de mensagens/projeções
   cobre apenas o chat. Rejeições de autenticação e payload anteriores ao handler
   não entram nessa amostra.
-- Os contadores residem no processo e reiniciam com ele. `/metrics` exige coleta
-  por Prometheus para histórico; resumo não agrega réplicas nem isola empresas.
+- Os contadores residem no processo e reiniciam com ele. O histórico exige coleta
+  externa; o resumo não agrega réplicas nem isola empresas.
   É uma visão operacional interna, não um painel para clientes.
 
 A resolução é informada em `/v1/observability/resolutions` com `request_id` e
 `resolved`. O feedback fica em memória, limita-se às 10.000 requisições mais
 recentes e se perde ao reiniciar o processo.
 
-Integração operacional: coletar `/metrics` na rede interna, montar painéis de
-latência, erros, custos estimados, juiz e validação humana no Grafana. Essa
-infraestrutura e a coleta persistente ainda não são provisionadas por esta mudança.
+O histórico das métricas depende de coleta e armazenamento externos; sua configuração
+deve ser verificada no ambiente.
 O aplicativo mobile continua consumindo os endpoints de chat normalmente.
 
 ### SCRUM-1964 — rastreamento do chat no LangSmith
@@ -396,8 +407,8 @@ Aceitação em QA após publicar a alteração: enviar uma mensagem sintética,
 conferir grafo e chamadas filhas no projeto `volta-chatbot-qa`, comparar tokens
 com o provedor e inspecionar também um erro e uma chamada de ferramenta.
 Confirmar ausência de conteúdo em todos os spans e verificar que o chat atende
-com a integração desligada ou com LangSmith indisponível. Essa aceitação real
-ainda precisa ser executada; criar o projeto/chave não ativa o serviço.
+com a integração desligada ou com LangSmith indisponível. A criação do projeto e
+da chave, por si só, não comprova essa aceitação.
 
 Validação local da integração: `python -m pytest -q tests/test_langsmith_tracing.py
 tests/test_chat.py tests/test_model_usage.py tests/test_observability.py
@@ -415,7 +426,7 @@ O cliente e os testes devem cobrir, no mínimo:
 - roteamento para cada especialista;
 - prompt injection e PII;
 - consulta RAG sem evidência suficiente;
-- geração de SQL somente leitura;
+- consultas de dados somente leitura;
 - triagem com e sem imagem;
 - reprovação pelo agente juiz;
 - resposta fundamentada no PDF VOLTA sem exposição de páginas ou metadados desse arquivo;
@@ -429,7 +440,7 @@ O cliente e os testes devem cobrir, no mínimo:
 - A qualidade do RAG depende da ingestão e atualização dos documentos oficiais.
 - A análise de imagem é uma sugestão probabilística; não mede massa nem substitui inspeção.
 - O chatbot não concede certificação química, ambiental ou regulatória.
-- Toda alteração definitiva em ocorrência deve passar pelo fluxo de aprovação humana.
+- Rascunhos de ocorrência criados pelo chatbot seguem o fluxo de aprovação humana; outras alterações dependem das regras da API de negócio.
 - Integrações externas precisam de timeout, retry controlado, logs sem PII e tratamento de indisponibilidade.
 - O código deve ser executado com imports de pacote consistentes e contratos alinhados entre API, agentes e persistência.
 
