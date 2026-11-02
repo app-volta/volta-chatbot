@@ -1,4 +1,5 @@
 from hashlib import sha256
+import logging
 from pathlib import Path
 import subprocess
 import sys
@@ -7,6 +8,7 @@ import httpx
 from langchain_core.documents import Document
 from langchain_core.embeddings import Embeddings
 import pytest
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.ai.multi_rag import FederatedRag
 from app.core.config import Settings
@@ -32,7 +34,7 @@ class ConstantEmbeddings(Embeddings):
         return [1.0, 1.0]
 
 
-@pytest.mark.parametrize("corpus", ["operational", "regulatory", "cooperatives", "history"])
+@pytest.mark.parametrize("corpus", ["operational", "regulatory", "cooperatives", "history", "weight"])
 def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp_path, corpus):
     settings = Settings(
         _env_file=None,
@@ -44,9 +46,9 @@ def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp
 
     indexed = rag.ingest_documents(
         corpus,
-        [Document(page_content="Procedimento de segregação do papelão.", metadata={"title": "manual", "tenant_id": "tenant-a"})],
+        [Document(page_content="Procedimento de segregação do papelão.", metadata={"title": "manual", "tenant_id": "tenant-a", "user_id": "user-a"})],
     )
-    citations = rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-a")
+    citations = rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-a", user_id="user-a")
 
     assert indexed == 1
     assert citations
@@ -54,7 +56,9 @@ def test_qdrant_backend_ingests_and_retrieves_with_the_configured_embeddings(tmp
     assert rag._qdrant.collection_exists(f"test-volta_{corpus}")
 
     if corpus == "history":
-        assert rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-b") == []
+        assert rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-b", user_id="user-a") == []
+        assert rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-a", user_id="user-b") == []
+        assert rag.retrieve(corpus, "segregação do papelão", tenant_id="tenant-a") == []
 
 
 def test_qdrant_corpora_reach_triage_without_cross_tenant_history(tmp_path):
@@ -67,19 +71,74 @@ def test_qdrant_corpora_reach_triage_without_cross_tenant_history(tmp_path):
     rag = FederatedRag(settings, embeddings=ConstantEmbeddings())
     rag.ingest_documents(
         "history",
-        [Document(page_content="Histórico: papelão separado no setor A.", metadata={"title": "histórico", "tenant_id": "tenant-a"})],
+        [Document(page_content="Histórico: papelão separado no setor A.", metadata={"title": "histórico", "tenant_id": "tenant-a", "user_id": "user-a"})],
     )
     rag.ingest_documents(
         "operational",
         [Document(page_content="Manual: papelão limpo segue para reciclagem.", metadata={"title": "manual"})],
     )
 
-    tenant_a = rag.retrieve_for_route("triage", "papelão", tenant_id="tenant-a")
-    tenant_b = rag.retrieve_for_route("triage", "papelão", tenant_id="tenant-b")
+    tenant_a = rag.retrieve_for_route("triage", "papelão", tenant_id="tenant-a", user_id="user-a")
+    tenant_b = rag.retrieve_for_route("triage", "papelão", tenant_id="tenant-b", user_id="user-a")
 
     assert {citation.title for citation in tenant_a} == {"histórico", "manual"}
     assert [citation.title for citation in tenant_b] == ["manual"]
     assert rag._qdrant.collection_exists("test-volta_operational")
+
+
+def test_qdrant_query_error_logs_safe_category_without_response_body(tmp_path, caplog, monkeypatch):
+    settings = Settings(
+        _env_file=None,
+        rag_base_path=str(tmp_path / "faiss"),
+        qdrant_url=":memory:",
+        qdrant_collection_prefix="test-volta",
+    )
+    rag = FederatedRag(settings, embeddings=ConstantEmbeddings())
+    rag.ingest_documents(
+        "history",
+        [Document(page_content="Resumo privado.", metadata={"tenant_id": "tenant-a", "user_id": "user-a"})],
+    )
+
+    def reject_query(**kwargs):
+        raise UnexpectedResponse(
+            status_code=400,
+            reason_phrase="Bad Request",
+            content=b'{"status":{"error":"Invalid filter value private-user-value"}}',
+            headers=httpx.Headers(),
+        )
+
+    monkeypatch.setattr(rag._qdrant, "query_points", reject_query)
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(UnexpectedResponse):
+            rag.retrieve("history", "papelão", tenant_id="tenant-a", user_id="user-a")
+
+    assert "corpus=history status=400 error_category=payload_filter" in caplog.text
+    assert "private-user-value" not in caplog.text
+
+
+def test_faiss_history_requires_exact_user_and_rejects_legacy_documents(tmp_path):
+    rag = FederatedRag(
+        Settings(_env_file=None, rag_base_path=str(tmp_path / "faiss"), qdrant_url=None),
+        embeddings=ConstantEmbeddings(),
+    )
+    rag.ingest_documents(
+        "history",
+        [
+            Document(page_content="Memória privada A.", metadata={"title": "user-a", "tenant_id": "tenant-a", "user_id": "user-a"}),
+            Document(page_content="Memória privada B.", metadata={"title": "user-b", "tenant_id": "tenant-a", "user_id": "user-b"}),
+            Document(page_content="Memória legada.", metadata={"title": "legacy", "tenant_id": "tenant-a"}),
+        ],
+    )
+
+    own = rag.retrieve("history", "memória", tenant_id="tenant-a", user_id="user-a")
+
+    assert [citation.title for citation in own] == ["user-a"]
+    assert rag.retrieve("history", "memória", tenant_id="tenant-a", user_id="user-c") == []
+    assert rag.retrieve("history", "memória", tenant_id="tenant-a") == []
+    for route in ("standards", "data", "performance"):
+        assert rag.retrieve_for_route(
+            route, "memória", tenant_id="tenant-a", user_id="user-a"
+        ) == []
 
 
 def test_migration_preserves_faiss_and_is_idempotent_without_reembedding(tmp_path):

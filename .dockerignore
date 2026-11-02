@@ -11,6 +11,9 @@ __pycache__
 tests
 scripts
 client.py
+requirements.in
+requirements-dev.in
+requirements-dev.txt
 
 .env
 .env.*
@@ -25,3 +28,4 @@ Dockerfile
 .dockerignore
 docker-compose.yml
 data/faiss
+data/documents/operational/volta.pdf

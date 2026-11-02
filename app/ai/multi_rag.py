@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -20,13 +21,36 @@ from langchain_core.embeddings import Embeddings
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import Distance, FieldCondition, Filter, MatchValue, PointStruct, VectorParams
 
 from app.core.config import Settings
 from app.db.models import SourceCitation
 
-Corpus = Literal["operational", "regulatory", "cooperatives", "history"]
-CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history")
+Corpus = Literal["operational", "regulatory", "cooperatives", "history", "weight"]
+CORPORA: tuple[Corpus, ...] = ("operational", "regulatory", "cooperatives", "history", "weight")
+logger = logging.getLogger(__name__)
+
+
+def _qdrant_error_category(exc: UnexpectedResponse) -> str:
+    try:
+        response = exc.structured()
+    except ValueError:
+        return "unstructured"
+    status = response.get("status") if isinstance(response, dict) else None
+    error = status.get("error") if isinstance(status, dict) else None
+    if not isinstance(error, str):
+        return "unclassified"
+    message = error.casefold()
+    if "dimension" in message and "vector" in message:
+        return "vector_dimension"
+    if any(term in message for term in ("filter", "condition", "payload", "index")):
+        return "payload_filter"
+    if "collection" in message:
+        return "collection"
+    if any(term in message for term in ("wrong input", "bad input", "invalid")):
+        return "request_validation"
+    return "unclassified"
 
 
 def _is_internal_document(metadata: dict, corpus: Corpus | None = None) -> bool:
@@ -59,6 +83,28 @@ class FederatedRag:
 
     def _collection_name(self, corpus: Corpus) -> str:
         return f"{self.settings.qdrant_collection_prefix}_{corpus}"
+
+    def log_knowledge_base_status(self) -> None:
+        """Reporta corpora estáticos ausentes sem registrar dados ou credenciais."""
+        for corpus in ("operational", "regulatory", "cooperatives"):
+            if self._qdrant is None:
+                available = (self._path(corpus) / "index.faiss").is_file()
+                if not available:
+                    logger.warning("RAG corpus '%s' indisponível: índice FAISS não encontrado.", corpus)
+                continue
+
+            collection = self._collection_name(corpus)
+            try:
+                if not self._qdrant.collection_exists(collection):
+                    logger.warning("RAG corpus '%s' indisponível: coleção Qdrant ausente.", corpus)
+                    continue
+                points = self._qdrant.count(collection_name=collection, exact=False).count
+                if points == 0:
+                    logger.warning("RAG corpus '%s' indisponível: coleção Qdrant vazia.", corpus)
+                else:
+                    logger.info("RAG corpus '%s' disponível (%s pontos).", corpus, points)
+            except Exception:
+                logger.warning("Não foi possível verificar o corpus RAG '%s'.", corpus)
 
     def _path(self, corpus: Corpus) -> Path:
         return self.base_path / corpus
@@ -287,21 +333,38 @@ class FederatedRag:
                         ))
         return self.ingest_documents(corpus, documents)
 
-    def retrieve(self, corpus: Corpus, query: str, k: int = 4, tenant_id: str | None = None) -> list[SourceCitation]:
+    def retrieve(
+        self,
+        corpus: Corpus,
+        query: str,
+        k: int = 4,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[SourceCitation]:
         if not query.strip():
             return []
+        if corpus == "history" and (not tenant_id or not user_id):
+            return []
         if self._qdrant is not None:
-            return self._retrieve_qdrant(corpus, query, k, tenant_id)
+            return self._retrieve_qdrant(corpus, query, k, tenant_id, user_id)
         store = self._load(corpus)
         if not store:
             return []
-        results = store.similarity_search_with_relevance_scores(query, k=max(k * 4, k) if tenant_id else k)
+        metadata_filter = (
+            {"tenant_id": tenant_id, "user_id": user_id}
+            if corpus == "history"
+            else None
+        )
+        search_options = {"filter": metadata_filter} if metadata_filter is not None else {}
+        results = store.similarity_search_with_relevance_scores(query, k=k, **search_options)
         citations: list[SourceCitation] = []
         for document, score in results:
             if score < 0.35:
                 continue
             metadata = document.metadata
-            if tenant_id and corpus == "history" and metadata.get("tenant_id") != tenant_id:
+            if corpus == "history" and (
+                metadata.get("tenant_id") != tenant_id or metadata.get("user_id") != user_id
+            ):
                 continue
             citations.append(
                 SourceCitation(
@@ -320,24 +383,43 @@ class FederatedRag:
                 break
         return citations
 
-    def _retrieve_qdrant(self, corpus: Corpus, query: str, k: int, tenant_id: str | None = None) -> list[SourceCitation]:
+    def _retrieve_qdrant(
+        self,
+        corpus: Corpus,
+        query: str,
+        k: int,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[SourceCitation]:
         collection_name = self._collection_name(corpus)
         if not self._qdrant.collection_exists(collection_name):
             return []
         vector = self.embeddings.embed_query(query)
         query_filter = None
-        if tenant_id and corpus == "history":
+        if corpus == "history":
             query_filter = Filter(
-                must=[FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id))]
+                must=[
+                    FieldCondition(key="metadata.tenant_id", match=MatchValue(value=tenant_id)),
+                    FieldCondition(key="metadata.user_id", match=MatchValue(value=user_id)),
+                ]
             )
-        results = self._qdrant.query_points(
-            collection_name=collection_name,
-            query=vector,
-            limit=k,
-            with_payload=True,
-            score_threshold=0.35,
-            query_filter=query_filter,
-        ).points
+        try:
+            results = self._qdrant.query_points(
+                collection_name=collection_name,
+                query=vector,
+                limit=k,
+                with_payload=True,
+                score_threshold=0.35,
+                query_filter=query_filter,
+            ).points
+        except UnexpectedResponse as exc:
+            logger.error(
+                "Qdrant query rejected corpus=%s status=%s error_category=%s",
+                corpus,
+                exc.status_code,
+                _qdrant_error_category(exc),
+            )
+            raise
         citations: list[SourceCitation] = []
         for result in results:
             payload = result.payload or {}
@@ -357,18 +439,26 @@ class FederatedRag:
             )
         return citations
 
-    def retrieve_for_route(self, route: str, query: str, tenant_id: str | None = None) -> list[SourceCitation]:
+    def retrieve_for_route(
+        self,
+        route: str,
+        query: str,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+    ) -> list[SourceCitation]:
         mapping: dict[str, tuple[Corpus, ...]] = {
             "triage": ("operational", "history"),
-            "standards": ("operational", "regulatory", "history"),
-            "performance": ("cooperatives", "history"),
+            "standards": ("operational", "regulatory"),
+            "performance": ("cooperatives",),
             # O agente de Dados usa RAG apenas para contexto e definições;
             # números e KPIs continuam vindo exclusivamente do PostgreSQL.
-            "data": ("regulatory", "history"),
+            "data": ("regulatory",),
         }
         citations: list[SourceCitation] = []
         for corpus in mapping.get(route, ()):
-            citations.extend(self.retrieve(corpus, query, tenant_id=tenant_id))
+            citations.extend(
+                self.retrieve(corpus, query, tenant_id=tenant_id, user_id=user_id)
+            )
         return citations
 
     def ingest_external_url(self, corpus: Corpus, url: str, title: str) -> int:

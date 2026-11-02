@@ -54,7 +54,10 @@ def test_close_session_indexes_only_the_sanitized_summary():
     corpus, documents = rag.documents[0]
     assert corpus == "history"
     assert documents[0].metadata["tenant_id"] == "tenant-a"
+    assert documents[0].metadata["user_id"] == "user-1"
     assert documents[0].metadata["session_id"] == "session-1"
+    assert documents[0].metadata["source_kind"] == "private_session_summary"
+    assert documents[0].metadata["validated"] is False
 
 
 class FixedEmbeddings(Embeddings):
@@ -65,7 +68,7 @@ class FixedEmbeddings(Embeddings):
         return [1.0, 0.0]
 
 
-def test_closed_session_summary_round_trips_through_qdrant_per_tenant(tmp_path):
+def test_closed_session_summary_round_trips_through_qdrant_per_user_and_tenant(tmp_path):
     sessions = FakeSessions()
     rag = FederatedRag(
         Settings(
@@ -86,13 +89,17 @@ def test_closed_session_summary_round_trips_through_qdrant_per_tenant(tmp_path):
     )
 
     tenant_a = rag.retrieve_for_route(
-        "triage", "Qual resíduo foi registrado no setor B?", tenant_id="tenant-a"
+        "triage", "Qual resíduo foi registrado no setor B?", tenant_id="tenant-a", user_id="user-1"
     )
     tenant_b = rag.retrieve_for_route(
-        "triage", "Qual resíduo foi registrado no setor B?", tenant_id="tenant-b"
+        "triage", "Qual resíduo foi registrado no setor B?", tenant_id="tenant-b", user_id="user-1"
+    )
+    other_user = rag.retrieve_for_route(
+        "triage", "Qual resíduo foi registrado no setor B?", tenant_id="tenant-a", user_id="user-2"
     )
 
     assert response.summary_indexed is True
     assert tenant_a and tenant_a[0].excerpt == "A sessão registrou papelão no setor B."
     assert tenant_a[0].source_id == "session-1"
     assert tenant_b == []
+    assert other_user == []

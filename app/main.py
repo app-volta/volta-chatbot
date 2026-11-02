@@ -1,13 +1,17 @@
 from contextlib import asynccontextmanager
 import logging
 import uuid
-from fastapi import FastAPI, status, HTTPException
+import anyio
+from langsmith import tracing_context
+from fastapi import Depends, FastAPI, status, HTTPException
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from langgraph.checkpoint.mongodb import MongoDBSaver
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from app.api import chat, occurrences
 from app.core.config import get_settings
+from app.core.auth import get_observability_access
 from app.core.observability import Observability
 from app.ai.multi_rag import FederatedRag
 from app.ai.agents import AgentTeam
@@ -15,9 +19,11 @@ from app.ai.graph import build_volta_graph
 from app.db.storage import db_postgres, db_mongo
 from app.api import sessions, observability
 from app.core.request_context import RequestIdFilter, request_id_context
+from app.core.langsmith_tracing import create_tracing_client, flush_traces
 
 
 _handler = logging.StreamHandler()
+logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, handlers=[_handler])
 _formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s request_id=%(request_id)s %(message)s")
 for _configured_handler in logging.getLogger().handlers:
@@ -29,6 +35,10 @@ for _configured_handler in logging.getLogger().handlers:
 async def lifespan(app: FastAPI):
     settings = get_settings()
 
+    if not settings.gemini_api_key:
+        logger.critical("Startup abortado: GEMINI_API_KEY é necessária para embeddings e RAG.")
+        raise RuntimeError("GEMINI_API_KEY é necessária para embeddings e RAG.")
+
     # 1. Abertura das conexões de banco de dados
     db_postgres.open(settings.postgres_url)
     db_mongo.open(settings.mongodb_url)
@@ -37,10 +47,16 @@ async def lifespan(app: FastAPI):
     # 2. Módulos de telemetria, RAG e equipe de agentes
     telemetry = Observability(settings)
     rag = FederatedRag(settings)
+    rag.log_knowledge_base_status()
     team = AgentTeam(settings, rag, db_postgres, telemetry)
 
     # 3. Checkpointer e Grafo do LangGraph
-    checkpointer = MongoDBSaver(db_mongo.client)
+    checkpointer = MongoDBSaver(db_mongo.client, serde=JsonPlusSerializer(allowed_msgpack_modules=[
+        ("app.db.models", name) for name in (
+            "SourceCitation", "SpecialistResult", "JudgeVerdict", "CorporateAnswer",
+            "ProposedOccurrence", "TriageAnalysis", "RouteName",
+        )
+    ]))
     graph = build_volta_graph(team, rag, checkpointer)
 
     # 4. Registro no state para injeção de dependência nas rotas
@@ -48,12 +64,16 @@ async def lifespan(app: FastAPI):
     app.state.rag = rag
     app.state.team = team
     app.state.graph = graph
+    app.state.langsmith_client = create_tracing_client(settings)
 
-    yield
-
-    # 5. Encerramento seguro das pools de conexão
-    db_postgres.close()
-    db_mongo.close()
+    try:
+        yield
+    finally:
+        if app.state.langsmith_client is not None:
+            await anyio.to_thread.run_sync(flush_traces, app.state.langsmith_client)
+        # 5. Encerramento seguro das pools de conexão
+        db_postgres.close()
+        db_mongo.close()
 
 
 app = FastAPI(
@@ -69,7 +89,9 @@ async def attach_request_id(request, call_next):
     request_id = str(uuid.uuid4())
     token = request_id_context.set(request_id)
     try:
-        response = await call_next(request)
+        # Only the explicit, filtered chat callback may export traces.
+        with tracing_context(enabled=False):
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         return response
     finally:
@@ -85,8 +107,15 @@ app.add_middleware(
 )
 
 
+@app.get("/health/live", tags=["System"])
+def liveness() -> dict:
+    """Process liveness must not restart healthy workers during a DB outage."""
+    return {"status": "alive"}
+
+
 @app.get("/health", tags=["System"])
-def health() -> dict:
+@app.get("/health/ready", tags=["System"])
+def health(response: Response) -> dict:
     try:
         postgres_ok = db_postgres.healthcheck()
         mongo_ok = db_mongo.healthcheck()
@@ -96,6 +125,8 @@ def health() -> dict:
             detail="Dependência de banco de dados indisponível.",
         ) from exc
 
+    if not postgres_ok or not mongo_ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return {
         "status": "ok" if postgres_ok and mongo_ok else "degraded",
         "postgres": postgres_ok,
@@ -111,7 +142,7 @@ app.include_router(observability.router, prefix="/v1/observability", tags=["Obse
 
 
 @app.get("/metrics", include_in_schema=False)
-def metrics() -> Response:
+def metrics(_access: None = Depends(get_observability_access)) -> Response:
     """Endpoint de scraping Prometheus sem conteúdo de requisições."""
     payload, content_type = Observability.prometheus_payload()
     return Response(content=payload, headers={"Content-Type": content_type})

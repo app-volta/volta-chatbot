@@ -1,5 +1,6 @@
 import asyncio
 import time
+from contextlib import nullcontext
 
 import anyio
 from fastapi import FastAPI
@@ -10,7 +11,7 @@ from app.api.chat import _enforce_judge_verdict, _mongo_call
 from app.api.chat import router as chat_router
 from app.core.auth import RequestIdentity, get_current_identity
 from app.core.dependencies import get_graph, get_sessions, get_telemetry
-from app.db.models import CorporateAnswer, JudgeVerdict, ProposedOccurrence, SourceCitation, SpecialistResult, TriageAnalysis
+from app.db.models import CorporateAnswer, JudgeVerdict, ProposedOccurrence, RouteName, SourceCitation, SpecialistResult, TriageAnalysis
 
 
 def test_rejected_judge_suppresses_unverified_specialist_fields_and_citations():
@@ -46,6 +47,30 @@ def test_rejected_judge_suppresses_unverified_specialist_fields_and_citations():
     assert "275" not in safe_judge.reason
 
 
+def test_rejected_standards_judge_suppresses_unverified_claims_without_human_gate():
+    answer = CorporateAnswer(answer="A PNRS define 300 kg conforme CONAMA 275.")
+    citations = [SourceCitation(source_id="guide", title="Guia", corpus="regulatory", excerpt="300 kg")]
+    specialist = SpecialistResult(metrics_summary={"answer": answer.answer})
+    judge = JudgeVerdict(approved=False, reason="A norma e o limite não têm suporte.")
+
+    safe_answer, safe_citations, safe_specialist, safe_judge = _enforce_judge_verdict(
+        answer, citations, specialist, judge, RouteName.STANDARDS
+    )
+
+    assert "300" not in safe_answer.answer
+    assert "275" not in safe_answer.answer
+    assert safe_answer.requires_human_validation is False
+    assert safe_citations == []
+    assert safe_specialist is None
+    assert safe_judge.approved is False
+
+    answer.requires_human_validation = True
+    reviewed_answer, _, _, _ = _enforce_judge_verdict(
+        answer, citations, specialist, judge, RouteName.STANDARDS
+    )
+    assert reviewed_answer.requires_human_validation is True
+
+
 class FakeSessions:
     def __init__(self, delay=0):
         self.delay = delay
@@ -78,15 +103,23 @@ class FakeChatTelemetry:
     def record_judge(self, *_args, **_kwargs):
         pass
 
+    def chat_request(self):
+        return nullcontext()
+
+    def record_human_intervention(self, _reason):
+        pass
+
 
 class FakeChatGraph:
     def __init__(self, delay=0, error=None):
         self.delay = delay
         self.error = error
         self.config = None
+        self.input = None
 
-    def invoke(self, _input, *, config):
+    def invoke(self, graph_input, *, config):
         self.config = config
+        self.input = graph_input
         if self.error:
             raise self.error
         if self.delay:
@@ -134,6 +167,11 @@ def test_chat_offloads_sync_mongo_calls_and_limits_graph_steps():
         assert response.status_code == 200
         assert ticks >= 10
         assert graph.config["recursion_limit"] == 25
+        assert graph.input["evidence"] == []
+        assert graph.input["database_data"] == []
+        assert graph.input["specialist"] is None
+        assert graph.input["judge"] is None
+        assert graph.input["corporate_answer"] is None
 
     asyncio.run(run())
 
@@ -180,5 +218,24 @@ def test_chat_provider_timeout_is_reported_and_counted_as_error():
             response = await client.post("/v1/chat", json={"session_id": "s-1", "message": "oi"})
         assert response.status_code == 503
         assert telemetry.requests[-1][0][2] == "error"
+
+    asyncio.run(run())
+
+
+def test_response_validation_failure_is_counted_once_as_error(monkeypatch):
+    async def run():
+        telemetry = FakeChatTelemetry()
+        app = _chat_test_app(FakeSessions(), FakeChatGraph(), telemetry)
+
+        def invalid_response(**_kwargs):
+            raise ValueError("resposta inválida")
+
+        monkeypatch.setattr("app.api.chat.ChatResponse", invalid_response)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/v1/chat", json={"session_id": "s-1", "message": "oi"})
+
+        assert response.status_code == 503
+        assert len(telemetry.requests) == 1
+        assert telemetry.requests[0][0][2] == "error"
 
     asyncio.run(run())

@@ -21,6 +21,21 @@ def test_analise_residuo_ia_deve_aceitar_mobile_summary():
     
     assert modelo.mobile_summary == "Lixo reciclável detectado, descarte na lixeira vermelha."
     assert modelo.ai_contamination_level == "BAIXO"
+    assert modelo.requires_human_validation is True
+
+
+def test_analise_residuo_rejects_negative_quantity_and_long_mobile_summary():
+    base = {
+        "detected_waste_type": "Plástico",
+        "ai_contamination_level": "BAIXO",
+        "recommendations": "Segregar",
+        "report_text": "Análise visual.",
+        "mobile_summary": "Plástico identificado.",
+    }
+    with pytest.raises(ValueError):
+        AnaliseResiduoIA(**base, estimated_quantity_kg=-1)
+    with pytest.raises(ValueError, match="20 palavras"):
+        AnaliseResiduoIA(**{**base, "mobile_summary": " ".join(["resíduo"] * 21)})
 
 
 def test_triage_analysis_rejects_mobile_summary_over_20_words():

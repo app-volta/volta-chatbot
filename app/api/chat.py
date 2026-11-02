@@ -23,7 +23,9 @@ from app.db.storage import SessionRepository
 from app.core.observability import Observability
 
 # Função fictícia para ilustrar a injeção do Grafo (você pode colocar isso no storage.py ou num dependencies.py)
-from app.core.dependencies import get_sessions, get_telemetry, get_graph
+from app.core.dependencies import get_sessions, get_telemetry, get_graph, get_langsmith_client
+from app.core.config import get_settings
+from app.core.langsmith_tracing import chat_tracer, invoke_chat_graph
 from app.core.request_context import log_exception_without_details, request_id_context
 
 router = APIRouter()
@@ -44,9 +46,25 @@ def _history_context(messages: list[dict]) -> list[dict[str, str]]:
     ][-8:]
 
 
-def _enforce_judge_verdict(answer, citations, specialist, judge):
+def _enforce_judge_verdict(answer, citations, specialist, judge, route=None):
     if judge is None or judge.approved:
         return answer, citations, specialist, judge
+
+    if route == RouteName.STANDARDS:
+        return (
+            CorporateAnswer(
+                title="Não consegui confirmar essa informação",
+                answer=(
+                    "Não consegui verificar a resposta nas fontes disponíveis. Posso explicar conceitos gerais; "
+                    "para detalhes de lei, vigência, valores ou recomendações técnicas, preciso de evidência verificável."
+                ),
+                recommended_actions=["Forneça uma fonte confiável ou pergunte sobre o conceito geral."],
+                requires_human_validation=answer.requires_human_validation,
+            ),
+            [],
+            None,
+            JudgeVerdict(approved=False, reason="As evidências disponíveis não sustentaram as afirmações específicas."),
+        )
 
     return (
         CorporateAnswer(
@@ -71,10 +89,12 @@ async def chat(
     identity: RequestIdentity = Depends(get_current_identity),
     sessions: SessionRepository = Depends(get_sessions),
     telemetry: Observability = Depends(get_telemetry),
-    graph = Depends(get_graph)
+    graph = Depends(get_graph),
+    tracing_client = Depends(get_langsmith_client),
 ) -> ChatResponse:
     started = perf_counter()
-    return await _process_chat(payload, identity, sessions, telemetry, graph, started)
+    with telemetry.chat_request():
+        return await _process_chat(payload, identity, sessions, telemetry, graph, started, tracing_client)
 
 
 async def _process_chat(
@@ -84,6 +104,7 @@ async def _process_chat(
     telemetry: Observability,
     graph,
     started: float,
+    tracing_client=None,
 ) -> ChatResponse:
     """
     Processa a requisição do usuário passando pela arquitetura Multiagente.
@@ -105,13 +126,14 @@ async def _process_chat(
                 answer=guardrail_saida(outer_guardrail.reason or "Solicitação bloqueada pelas diretrizes de segurança."),
                 recommended_actions=["Reformule a solicitação para o escopo de resíduos, ESG ou operações."]
             )
-            telemetry.record_request("blocked", started, "blocked")
-            return ChatResponse(
+            response = ChatResponse(
                 request_id=request_id, 
                 session_id=payload.session_id, 
                 route=RouteName.BLOCKED, 
                 response=answer
             )
+            telemetry.record_request("blocked", started, "blocked", request_id=str(request_id))
+            return response
 
         # 3. Histórico Seguro: recupera o contexto anterior e persiste só o texto higienizado.
         history = _history_context(await _mongo_call(sessions.recent_history, payload.session_id))
@@ -126,13 +148,29 @@ async def _process_chat(
             "session_id": payload.session_id,
             "input_text": outer_guardrail.sanitized_text,
             "history": history,
+            "clean_input": "",
+            "route": "",
+            "direct_reply": "",
+            "evidence": [],
+            "database_data": [],
+            "specialist": None,
+            "judge": None,
+            "corporate_answer": None,
         }
         
         config = {"configurable": {"thread_id": payload.session_id}, "recursion_limit": CHAT_GRAPH_RECURSION_LIMIT}
+        settings = get_settings()
+        tracer = chat_tracer(tracing_client, settings) if tracing_client is not None else None
+        if tracer is not None:
+            config.update({
+                "run_name": "volta_chat",
+                "callbacks": [tracer],
+                "metadata": {"request_id": str(request_id), "environment": settings.environment},
+            })
         
         # 5. Execução do Multiagente (O professor alerta: NÃO bloquear o event loop aqui!)
         result = await anyio.to_thread.run_sync(
-            lambda: graph.invoke(graph_input, config=config),
+            lambda: invoke_chat_graph(graph, graph_input, config, tracing_client, settings),
             abandon_on_cancel=False,
         )
         
@@ -149,7 +187,9 @@ async def _process_chat(
         if result.get("judge"):
             judge = JudgeVerdict.model_validate(result["judge"])
 
-        answer, citations, specialist, judge = _enforce_judge_verdict(answer, citations, specialist, judge)
+        answer, citations, specialist, judge = _enforce_judge_verdict(
+            answer, citations, specialist, judge, route
+        )
         answer = answer.model_copy(update={
             "answer": guardrail_saida(
                 answer.answer,
@@ -159,14 +199,8 @@ async def _process_chat(
         citations = [citation for citation in citations if not citation.internal_document]
         if judge is not None:
             judge = JudgeVerdict(approved=judge.approved)
-        
-        # 7. Finalização, persistência e resposta
-        await _mongo_call(sessions.append_message, payload.session_id, "assistant", answer.answer, str(request_id))
-        if judge is not None:
-            telemetry.record_judge(judge.approved, human_intervention=not judge.approved)
-        telemetry.record_request(route.value, started, "success", resolved=not judge or judge.approved)
-        
-        return ChatResponse(
+
+        response = ChatResponse(
             request_id=request_id,
             session_id=payload.session_id,
             route=route,
@@ -176,12 +210,21 @@ async def _process_chat(
             triage_analysis=specialist.triage_analysis if specialist else None,
             judge=judge,
         )
+
+        # 7. Finalização, persistência e telemetria
+        await _mongo_call(sessions.append_message, payload.session_id, "assistant", answer.answer, str(request_id))
+        if judge is not None:
+            telemetry.record_judge(judge.approved, human_intervention=answer.requires_human_validation)
+        if answer.requires_human_validation and (judge is None or judge.approved):
+            telemetry.record_human_intervention("answer_requires_validation")
+        telemetry.record_request(route.value, started, "success", request_id=str(request_id))
+        return response
         
     except PermissionError as exc:
-        telemetry.record_request("authorization", started, "forbidden")
+        telemetry.record_request("authorization", started, "forbidden", request_id=str(request_id))
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Sessão não autorizada.") from exc
         
     except Exception as exc:
         log_exception_without_details(logger, "Chat request failed", exc)
-        telemetry.record_request("unknown", started, "error")
+        telemetry.record_request("unknown", started, "error", request_id=str(request_id))
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Não foi possível concluir a análise operacional.") from exc

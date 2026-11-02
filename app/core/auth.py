@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from hmac import compare_digest
 from typing import Annotated
 from uuid import UUID
 
@@ -15,6 +16,19 @@ class RequestIdentity:
     tenant_id: str
     user_id: str
     role: str | None = None
+
+
+def get_observability_access(
+    authorization: Annotated[str | None, Header(alias="Authorization")] = None,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Global metrics require an operator credential, never a customer's JWT."""
+    if settings.observability_api_key is None or not settings.observability_api_key.get_secret_value():
+        raise HTTPException(status_code=503, detail="Observabilidade operacional não configurada.")
+    scheme, _, supplied = (authorization or "").partition(" ")
+    expected = settings.observability_api_key.get_secret_value()
+    if scheme.casefold() != "bearer" or len(supplied) > 4096 or not compare_digest(supplied.encode(), expected.encode()):
+        raise HTTPException(status_code=401, detail="Credencial operacional obrigatória.", headers={"WWW-Authenticate": "Bearer"})
 
 
 def get_current_identity(

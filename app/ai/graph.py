@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import re
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -11,10 +13,12 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-from app.ai.agents import AgentTeam
+from app.ai.agents import AgentTeam, _citation_identity
 from app.core.guardrails import guardrail_entrada, guardrail_saida
 from app.ai.multi_rag import FederatedRag
 from app.db.models import CorporateAnswer, JudgeVerdict, RouteName, SourceCitation, SpecialistResult
+
+logger = logging.getLogger(__name__)
 
 
 class VoltaState(TypedDict, total=False):
@@ -30,9 +34,9 @@ class VoltaState(TypedDict, total=False):
     direct_reply: str
     evidence: list[SourceCitation] # Usando a classe diretamente!
     database_data: list[dict[str, Any]]
-    specialist: SpecialistResult   # Usando a classe diretamente!
-    judge: JudgeVerdict            # Usando a classe diretamente!
-    corporate_answer: CorporateAnswer # Usando a classe diretamente!
+    specialist: SpecialistResult | None
+    judge: JudgeVerdict | None
+    corporate_answer: CorporateAnswer | None
 
 
 def _extract_month_year(text: str) -> tuple[int, int]:
@@ -63,8 +67,32 @@ def _db_citation(title: str, source_id: str, payload: list[dict]) -> SourceCitat
     )
 
 
+def _merge_evidence(*groups: list[SourceCitation]) -> list[SourceCitation]:
+    merged = []
+    seen = set()
+    for item in (citation for group in groups for citation in group):
+        key = _citation_identity(item)
+        if key not in seen:
+            seen.add(key)
+            merged.append(item)
+    return merged
+
+
 def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
-    
+
+    def reset_turn(_state: VoltaState) -> dict:
+        """Remove dados calculados no turno anterior antes de retomar o checkpoint."""
+        return {
+            "clean_input": "",
+            "route": "",
+            "direct_reply": "",
+            "evidence": [],
+            "database_data": [],
+            "specialist": None,
+            "judge": None,
+            "corporate_answer": None,
+        }
+
     def input_guardrail(state: VoltaState) -> dict:
         result = guardrail_entrada(state["input_text"])
         if result.blocked:
@@ -76,15 +104,21 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         return {"route": decision.route.value, "direct_reply": decision.direct_reply or ""}
 
     def triage(state: VoltaState) -> dict:
-        evidence = rag.retrieve_for_route("triage", state["clean_input"], state.get("tenant_id"))
-        result = team.specialist("triage", state["clean_input"], evidence, history=state.get("history", []))
+        evidence = rag.retrieve_for_route(
+            "triage", state["clean_input"], state.get("tenant_id"), state.get("user_id")
+        )
+        with team.collect_rag_citations() as tool_evidence:
+            result = team.specialist("triage", state["clean_input"], evidence, history=state.get("history", []))
+        evidence = _merge_evidence(evidence, tool_evidence)
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def standards(state: VoltaState) -> dict:
-        evidence = rag.retrieve_for_route("standards", state["clean_input"], state.get("tenant_id"))
-        with team.collect_norm_citations() as external_evidence:
+        evidence = rag.retrieve_for_route(
+            "standards", state["clean_input"], state.get("tenant_id"), state.get("user_id")
+        )
+        with team.collect_rag_citations() as tool_evidence, team.collect_norm_citations() as external_evidence:
             result = team.specialist("standards", state["clean_input"], evidence, history=state.get("history", []))
-        evidence = [*evidence, *external_evidence]
+        evidence = _merge_evidence(evidence, tool_evidence, external_evidence)
         return {"evidence": evidence, "database_data": [], "specialist": result}
 
     def data(state: VoltaState) -> dict:
@@ -94,7 +128,9 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         except Exception:
             rows = [{"availability": "Dados indisponíveis para consulta no momento.", "month": month, "year": year}]
         db_evidence = _db_citation("Métricas ESG do PostgreSQL", f"postgres-esg-{year}-{month}", rows)
-        contextual_evidence = rag.retrieve_for_route("data", state["clean_input"], state.get("tenant_id"))
+        contextual_evidence = rag.retrieve_for_route(
+            "data", state["clean_input"], state.get("tenant_id"), state.get("user_id")
+        )
         evidence = [db_evidence, *contextual_evidence]
         result = team.specialist("data", state["clean_input"], evidence, rows, history=state.get("history", []))
         return {"evidence": evidence, "database_data": rows, "specialist": result}
@@ -104,23 +140,44 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
             rows = team.postgres.consultar_performance_cooperativas(state.get("tenant_id"))
         except Exception:
             rows = [{"availability": "Indicadores de cooperativas indisponíveis para consulta no momento."}]
-        rag_evidence = rag.retrieve_for_route("performance", state["clean_input"], state.get("tenant_id"))
+        rag_evidence = rag.retrieve_for_route(
+            "performance", state["clean_input"], state.get("tenant_id"), state.get("user_id")
+        )
         evidence = [_db_citation("Indicadores de cooperativas do PostgreSQL", "postgres-cooperatives", rows), *rag_evidence]
-        result = team.specialist("performance", state["clean_input"], evidence, rows, history=state.get("history", []))
+        with team.collect_rag_citations() as tool_evidence:
+            result = team.specialist("performance", state["clean_input"], evidence, rows, history=state.get("history", []))
+        evidence = _merge_evidence(evidence, tool_evidence)
         return {"evidence": evidence, "database_data": rows, "specialist": result}
 
     def judge(state: VoltaState) -> dict:
-        # Como passamos os objetos direto para o estado, não precisamos do model_validate
-        verdict = team.judge_result(state["specialist"], state.get("evidence", []), state.get("database_data", []))
+        specialist = state.get("specialist")
+        if specialist is None:
+            raise RuntimeError("Especialista ausente antes da avaliação do juiz.")
+        evidence = state.get("evidence", [])
+        verdict = team.judge_result(
+            specialist,
+            evidence,
+            state.get("database_data", []),
+            route=state.get("route"),
+            question=state.get("clean_input"),
+        )
+        logger.info(
+            "Chat judge completed route=%s approved=%s evidence_count=%s evidence_by_corpus=%s",
+            state.get("route"),
+            verdict.approved,
+            len(evidence),
+            dict(Counter(item.corpus for item in evidence)),
+        )
         return {"judge": verdict}
 
     def orchestrator(state: VoltaState) -> dict:
         route = state["route"]
         specialist = state.get("specialist")
         verdict = state.get("judge")
-        
         # Se o juiz não aprovou, o orquestrador vai saber que precisa arrumar a resposta baseando-se no 'reason'
-        answer = team.format_answer(route, specialist, verdict, state.get("direct_reply"))
+        answer = team.format_answer(
+            route, specialist, verdict, state.get("direct_reply"), question=state.get("clean_input")
+        )
         return {"corporate_answer": answer}
 
     def blocked_response(state: VoltaState) -> dict:
@@ -133,19 +190,18 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
         return {"corporate_answer": answer}
 
     def output_guardrail(state: VoltaState) -> dict:
-        answer = state["corporate_answer"]
+        answer = state.get("corporate_answer")
+        if answer is None:
+            raise RuntimeError("Resposta corporativa ausente antes do guardrail de saída.")
         route = state.get("route")
         judge = state.get("judge")
-        requires_human_validation = (
-            route == RouteName.TRIAGE.value
-            or (
+        if route == RouteName.STANDARDS.value:
+            requires_human_validation = answer.requires_human_validation
+        else:
+            requires_human_validation = route == RouteName.TRIAGE.value or (
                 route not in {RouteName.DIRECT.value, RouteName.BLOCKED.value}
-                and (
-                    answer.requires_human_validation
-                    or (judge is not None and not judge.approved)
-                )
+                and (answer.requires_human_validation or (judge is not None and not judge.approved))
             )
-        )
         # Só rodamos a limpeza se não for uma resposta bloqueada padrão
         safe_text = (
             guardrail_saida(answer.answer, requires_human_validation=requires_human_validation)
@@ -171,6 +227,7 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
 
     # Construção do Grafo
     graph = StateGraph(VoltaState)
+    graph.add_node("reset_turn", reset_turn)
     graph.add_node("input_guardrail", input_guardrail)
     graph.add_node("router", router)
     graph.add_node("triage", triage)
@@ -182,7 +239,8 @@ def build_volta_graph(team: AgentTeam, rag: FederatedRag, checkpointer: Any):
     graph.add_node("blocked", blocked_response)
     graph.add_node("output_guardrail", output_guardrail)
     
-    graph.add_edge(START, "input_guardrail")
+    graph.add_edge(START, "reset_turn")
+    graph.add_edge("reset_turn", "input_guardrail")
     graph.add_conditional_edges("input_guardrail", after_input, {"router": "router", "blocked": "blocked"})
     graph.add_conditional_edges(
         "router",

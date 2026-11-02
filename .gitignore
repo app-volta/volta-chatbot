@@ -1,6 +1,9 @@
 .env
+.env.*
+!.env.example
 venv/
 __pycache__/
 data/faiss/
+data/documents/operational/volta.pdf
 .maestri/
 .pytest_cache/

@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field, HttpUrl, SecretStr
+from pydantic import AliasChoices, Field, HttpUrl, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,10 +15,17 @@ class Settings(BaseSettings):
     api_prefix: str = "/v1"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:3000"])
 
+    @field_validator("cors_origins")
+    @classmethod
+    def validate_cors_origins(cls, origins: list[str]) -> list[str]:
+        if "*" in origins:
+            raise ValueError("CORS_ORIGINS não pode conter '*' com credenciais habilitadas.")
+        return origins
+
     gemini_api_key: SecretStr | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.8-flash"
     groq_api_key: SecretStr | None = None
-    groq_router_model: str = "llama-3.3-70b-versatile"
+    groq_router_model: str = "openai/gpt-oss-120b"
 
     postgres_dsn: SecretStr = Field(
         default=SecretStr("postgresql://volta:volta@localhost:5432/volta"),
@@ -41,6 +48,12 @@ class Settings(BaseSettings):
     a2a_timeout_seconds: int = 10
     ingestion_api_key: SecretStr | None = None
     jwt_key: SecretStr | None = Field(default=None, validation_alias="JWT_KEY")
+    observability_api_key: SecretStr | None = None
+    volta_langsmith_enabled: bool = False
+    langsmith_api_key: SecretStr | None = None
+    langsmith_project: str | None = None
+    langsmith_endpoint: HttpUrl = HttpUrl("https://api.smith.langchain.com")
+    langsmith_workspace_id: str | None = None
 
     # Estimativas configuráveis, para o painel acadêmico de custo/ROI.
     gemini_input_usd_per_million: float = 0.30

@@ -69,8 +69,11 @@ def close(
                                 "source_id": session_id,
                                 "session_id": session_id,
                                 "tenant_id": identity.tenant_id,
-                                "title": "Resumo da sessão",
-                                "location": "sessão encerrada",
+                                "user_id": identity.user_id,
+                                "title": "Memória privada da própria sessão",
+                                "location": "contexto conversacional não validado; não usar como fonte normativa",
+                                "source_kind": "private_session_summary",
+                                "validated": False,
                             },
                         )
                     ],
